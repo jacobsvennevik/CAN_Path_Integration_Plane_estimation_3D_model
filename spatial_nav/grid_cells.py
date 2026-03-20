@@ -78,56 +78,42 @@ class CAN:
     def construct_weight_matrix(self):
         identifier = "burak_fiete_2009_W_" + ("periodic" if self.periodic else "aperiodic") + \
             f"N_{self.num_neurons}_ell_{self.ell}"
-        
-        if os.path.exists(f"logs/{identifier}.pkl"):
-            with open(f"logs/{identifier}.pkl", "rb") as f:
-                W = pickle.load(f)
-            f.close()
 
+        logs_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        cache_path = os.path.join(logs_dir, f"{identifier}.pkl")
+
+        if os.path.exists(cache_path):
+            with open(cache_path, "rb") as f:
+                W = pickle.load(f)
             print("Cached W matrix loaded!")
         else:
             print("Generating weight matrix")
             
             W = np.zeros((self.num_neurons, self.num_neurons))
+            # precompute the 9 torus offset vectors for the periodic case
+            torus_offsets = np.array([[dx, dy] for dx in [-1, 0, 1] for dy in [-1, 0, 1]])
+
             with trange(self.num_neurons, dynamic_ncols=True) as pbar:
                 for i in pbar:
-                    if self.periodic:
-                        #periodic case have to wrap the neurons, so that it looks like a torus.
-                        squared_shift_length = np.zeros((9, self.num_neurons))
-                        shifts = np.tile(self.neural_sheet[:, [i]], [1, self.num_neurons]) - self.neural_sheet - self.ell * self.direction_vecs
-                        squared_shift_length[0, :] = np.sum(np.square(shifts), axis=0)
-                        shifts = np.tile(self.neural_sheet[:, [i]], [1, self.num_neurons]) - self.neural_sheet - self.ell * self.direction_vecs - self.side_len * np.concatenate([np.ones((1, self.num_neurons)), np.zeros((1, self.num_neurons))], axis=0)
-                        squared_shift_length[1, :] = np.sum(np.square(shifts), axis=0)
-                        shifts = np.tile(self.neural_sheet[:, [i]], [1, self.num_neurons]) - self.neural_sheet - self.ell * self.direction_vecs + self.side_len * np.concatenate([np.ones((1, self.num_neurons)), np.zeros((1, self.num_neurons))], axis=0)
-                        squared_shift_length[2, :] = np.sum(np.square(shifts), axis=0)
-                        shifts = np.tile(self.neural_sheet[:, [i]], [1, self.num_neurons]) - self.neural_sheet - self.ell * self.direction_vecs - self.side_len * np.concatenate([np.zeros((1, self.num_neurons)), np.ones((1, self.num_neurons))], axis=0)
-                        squared_shift_length[3, :] = np.sum(np.square(shifts), axis=0)
-                        shifts = np.tile(self.neural_sheet[:, [i]], [1, self.num_neurons]) - self.neural_sheet - self.ell * self.direction_vecs + self.side_len * np.concatenate([np.zeros((1, self.num_neurons)), np.ones((1, self.num_neurons))], axis=0)
-                        squared_shift_length[4, :] = np.sum(np.square(shifts), axis=0)
-                        shifts = np.tile(self.neural_sheet[:, [i]], [1, self.num_neurons]) - self.neural_sheet - self.ell * self.direction_vecs + self.side_len * np.concatenate([np.ones((1, self.num_neurons)), np.ones((1, self.num_neurons))], axis=0)
-                        squared_shift_length[5, :] = np.sum(np.square(shifts), axis=0)
-                        shifts = np.tile(self.neural_sheet[:, [i]], [1, self.num_neurons]) - self.neural_sheet - self.ell * self.direction_vecs + self.side_len * np.concatenate([-1 * np.ones((1, self.num_neurons)), np.ones((1, self.num_neurons))], axis=0)
-                        squared_shift_length[6, :] = np.sum(np.square(shifts), axis=0)
-                        shifts = np.tile(self.neural_sheet[:, [i]], [1, self.num_neurons]) - self.neural_sheet - self.ell * self.direction_vecs + self.side_len * np.concatenate([np.ones((1, self.num_neurons)), -1 * np.ones((1, self.num_neurons))], axis=0)
-                        squared_shift_length[7, :] = np.sum(np.square(shifts), axis=0)
-                        shifts = np.tile(self.neural_sheet[:, [i]], [1, self.num_neurons]) - self.neural_sheet - self.ell * self.direction_vecs - self.side_len * np.concatenate([np.ones((1, self.num_neurons)), np.ones((1, self.num_neurons))], axis=0)
-                        squared_shift_length[8, :] = np.sum(np.square(shifts), axis=0)
-                        
-                        squared_shift_length = np.min(squared_shift_length, axis=0)
-                    else:
-                        # This is the aperiodic case, There is no wrapping. Neurons at opposite edges of the 
-                        # sheet are far apart and will have negligible or zero weight between them.
-                        shifts = np.tile(self.neural_sheet[:, [i]], [1, self.num_neurons]) - self.neural_sheet - self.ell * self.direction_vecs
-                        squared_shift_length = np.sum(np.square(shifts), axis=0)
+                    base_shifts = np.tile(self.neural_sheet[:, [i]], [1, self.num_neurons]) - self.neural_sheet - self.ell * self.direction_vecs
 
+                    if self.periodic:
+                        # wrap onto torus by taking the minimum distance across all 9 image copies
+                        squared_shift_length = np.min([
+                            np.sum(np.square(base_shifts - self.side_len * o[:, None]), axis=0)
+                            for o in torus_offsets
+                        ], axis=0)
+                    else:
+                        # aperiodic: neurons at opposite edges have negligible weight
+                        squared_shift_length = np.sum(np.square(base_shifts), axis=0)
+                    # Eq 3
                     w_temp = self.a * np.exp(-self.gamma * squared_shift_length) - np.exp(-self.beta * squared_shift_length)
                     w_temp[w_temp > self.w_sparse_threshold] = 0
-                    
                     W[i, :] = w_temp
-            
-            with open(f"logs/{identifier}.pkl", "wb") as f:
-                pickle.dump(W, f)                    
-            f.close()
+
+            with open(cache_path, "wb") as f:
+                pickle.dump(W, f)
         
         return W
     
@@ -169,6 +155,13 @@ class CAN:
         
         return pos, velocity
     
+    def step(self, s: np.ndarray, v: np.ndarray) -> np.ndarray:
+        """Single Burak & Fiete update step (eq. 1 & 3)."""
+        B = self.A * (1 + self.alpha * np.dot(v, self.direction_vecs))
+        s_in = self.W.dot(s) + B
+        s_in = s_in * (s_in > 0)
+        return s + self.dt * (s_in - s) / self.tau
+
     def simulation(self, logdir: Optional[str] = None):
         if self.use_real_traj:
             assert logdir is not None
@@ -197,13 +190,7 @@ class CAN:
                     curr_direction[i] = np.arctan2(v[1], v[0])
                     speed[i] = np.sqrt(v[0] ** 2 + v[1] ** 2)
                     
-                    # feedforward input
-                    B = self.A * (1 + self.alpha * np.dot(v, self.direction_vecs))
-                    
-                    s_inputs = self.W.dot(s) + B
-                    s_inputs = s_inputs * (s_inputs > 0)
-                    
-                    s = s + self.dt * (s_inputs - s) / self.tau
+                    s = self.step(s, v)
                     
                     if s[self.watch_cell] > self.spike_threshold:
                         spike_coordinates.append([pos[0, i], pos[1, i]])
