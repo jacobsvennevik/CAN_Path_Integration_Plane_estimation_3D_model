@@ -1,3 +1,3 @@
 Implemented changes:
 
-- none yet
+- implemented the reccursive Bingham distribution filter.
