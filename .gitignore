@@ -199,4 +199,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# Large simulation outputs (pickle files, logs)
+*.pkl
+logs/
+
 
