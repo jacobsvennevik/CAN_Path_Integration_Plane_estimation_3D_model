@@ -203,4 +203,5 @@ __marimo__/
 *.pkl
 logs/
 
-
+#remove old notebooks not in use
+analysis/notebooks/
