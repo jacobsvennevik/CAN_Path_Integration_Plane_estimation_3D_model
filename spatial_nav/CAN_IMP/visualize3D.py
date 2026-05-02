@@ -14,10 +14,8 @@ from made.visuals import clean_axes
 
 import matplotlib.pyplot as plt
 import numpy as np
-
-# ------------------------------------------------------------------ #
-#                           PLOT HELPERS                             #
-# ------------------------------------------------------------------ #
+from sklearn.decomposition import PCA
+from sklearn.manifold import Isomap
 
 def _plot_slice(ax, X, Y, sl, ref_xy, xlabel, ylabel, title,
                 cmap, vmin, vmax, ref_color="black", ref_label="Selected neuron"):
@@ -65,11 +63,11 @@ def _scatter_plot(ax, X, Y, Z, ref_xy, xlabel, ylabel, title, cmap, vmin, vmax):
     plt.colorbar(scatter, ax=ax, label="Neuron state")
     clean_axes(ax, title=title, ylabel=ylabel)
     ax.set_xlabel(xlabel)
+    
+def _neuron_counts(can):
+    """ Calculate grid dimensions based on spacing (number of nerons along theta_i) """
+    return can.nx(0), can.nx(1), can.nx(2) #neurons along theta_1
 
-
-# ------------------------------------------------------------------ #
-#                     three slices of 3D data                        #
-# ------------------------------------------------------------------ #
 
 def _visualize_3d_data_slices(can, data_3d, ref_idx, title_prefix, cmap,
                                vmin=None, vmax=None, plot_fn=None):
@@ -87,10 +85,8 @@ def _visualize_3d_data_slices(can, data_3d, ref_idx, title_prefix, cmap,
     Returns:
         fig, axes: figure and length-3 axes array
     """
-    # Calculate grid dimensions based on spacing (number of nerons along theta_i)
-    n1 = can.nx(0) #neurons along theta_1
-    n2 = can.nx(1)
-    n3 = can.nx(2)
+    #how man neurons pr dimensions
+    n1,n2,n3 = _neuron_counts(can)
     
     #change the flat neuron coordinate array into a 3D grid
     coords_3d  = can.neurons_coordinates.reshape(n1, n2, n3, 3)
@@ -128,10 +124,6 @@ def _visualize_3d_data_slices(can, data_3d, ref_idx, title_prefix, cmap,
     return fig, axes
 
 
-# ------------------------------------------------------------------ #
-#                    CONNECTIVITY VISUALIZER                         #
-# ------------------------------------------------------------------ #
-
 def _visualize_conn_3d(can, neuron_idx, cmap="bwr", vmin=-1, vmax=0):
     """
     Visualise Can connecitivty for a single neuron.
@@ -148,10 +140,9 @@ def _visualize_conn_3d(can, neuron_idx, cmap="bwr", vmin=-1, vmax=0):
     Returns:
         The matplotlib axes with the plot
     """
-    # Calculate grid dimensions based on spacing (number of nerons along theta_i)
-    n1 = can.nx(0) #neurons along theta_1
-    n2 = can.nx(1)
-    n3 = can.nx(2)
+    #how man neurons pr dimensions
+    n1,n2,n3 = _neuron_counts(can)
+    
     # Reshape flat connecitivty matrix and neuron coordinates back into 3D grid
     conn_3d = can.connectivity_matrix[neuron_idx].reshape(n1, n2, n3)
     # Delegate to the generic slicer and anchors all three slices at neuron_idx
@@ -283,10 +274,6 @@ def visualize_can_connectivity_3d(can, cmap="bwr", vmin=-1, vmax=0):
     return results
 
 
-# ------------------------------------------------------------------ #
-#                    VISUALIZE CAN STATE (3D)                        #
-# ------------------------------------------------------------------ #
-
 def visualize_can_state_3d(can, cmap="inferno"):
     """Visualize the current activity state of a 3D CAN as three 2D slices.
 
@@ -301,12 +288,139 @@ def visualize_can_state_3d(can, cmap="inferno"):
     Returns:
         fig, axes: figure and length-3 axes array
     """
-    n1 = can.nx(0)
-    n2 = can.nx(1)
-    n3 = can.nx(2)
+    #how man neurons pr dimensions
+    n1,n2,n3 = _neuron_counts(can)
+    
     state_3d = can.S.reshape(n1, n2, n3)
     #returns the peak activation
     max_idx = int(can.S.argmax())
 
     return _visualize_3d_data_slices(can, state_3d, max_idx, "State", cmap=cmap,
                                      plot_fn=_scatter_plot)
+
+#Todo: Not sure if this is in use anymore
+def _plot_marginals(data, title, color, alpha, s):
+    """Plot 2D marginal projections of 3D data."""
+    
+    pairs = [
+    (0, 1, 'θ₁', 'θ₂', 'Marginal: all θ₃'),
+    (0, 2, 'θ₁', 'θ₃', 'Marginal: all θ₂'),
+    (1, 2, 'θ₂', 'θ₃', 'Marginal: all θ₁'),
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    for ax, (i, j, li, lj, panel_title) in zip(axes, pairs):
+        ax.scatter(data[:, i], data[:, j], color=color, alpha=alpha, s=s)
+        ax.set_xlabel(li)
+        ax.set_ylabel(lj)
+        ax.set_xlim(0, 2 * np.pi)
+        ax.set_ylim(0, 2 * np.pi)
+        ax.set_title(panel_title)
+        ax.set_aspect('equal')
+    fig.suptitle(title, y=1.02)
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+def wrapped_angle_diff(a, b, period=2 * np.pi):
+    """
+    Since theta_i lives on the circle (is periodic) we need to calculate the angular distance.  
+    """
+    return (a - b + period / 2) % period - period / 2
+
+
+def isomap_slice(
+    final_states,
+    bump_coords,
+    target_theta3,
+    slice_width,
+    n_pca=50,
+    n_neighbors=8,
+):
+    """
+    Takes a slice of the T^3 manifold at a fixed θ₃ value and
+    visualizes the T² slice using dimensionality reduction with PCA and Isomap.
+    """
+    #Slicing logic
+    #take the final simulations states, filter so that only the states inside the slice_width is added 
+    dtheta3 = wrapped_angle_diff(bump_coords[:, 2], target_theta3)
+    mask = np.abs(dtheta3) < slice_width
+    #Apply the mask
+    states_slice = final_states[mask] #the full population vectors
+    coords_slice = bump_coords[mask] #decoded positions
+
+    # Remove duplicated settled states so that identical bumps don't dominate later analysis
+    # Widt larger amount of neurons might not be needed
+    _, first_idx = np.unique(
+        np.round(coords_slice, 6), axis=0, return_index=True,
+    )
+    states_slice = states_slice[first_idx]
+    coords_slice = coords_slice[first_idx]
+    #Run the PCA reduction and ISO embedding
+    states_pca = PCA(n_components=n_pca).fit_transform(states_slice)
+    iso = Isomap(
+        n_components=3, n_neighbors=n_neighbors,
+    )
+    embedding = iso.fit_transform(states_pca)
+    #How much information is lost
+    print(f"reconstruction error {iso.reconstruction_error():.4f}")
+    return embedding, coords_slice
+
+
+def plot_isomap_slices(
+    final_states,
+    bump_coords,
+    can,
+    n_slices=4,
+    slice_width=None,
+    elev=30,
+    azim=45,
+    point_color="black",
+    point_alpha=0.75,
+    point_size=18,
+):
+    """
+    Plot PCA to Isomap embeddings of T^2 slices.
+    """
+    if slice_width is None:
+        slice_width = can.spacing
+
+    n3 = can.nx(2)
+    indices = sorted({
+        max(1, int(round((i + 1) * n3 / (n_slices + 1))))
+        for i in range(n_slices)
+    })
+    theta3s = [can.idx2coord(i, 2) for i in indices]
+
+    fig = plt.figure(figsize=(5 * len(theta3s), 5))
+    axes = []
+    for col, theta3 in enumerate(theta3s):
+        embedding, _ = isomap_slice(
+            final_states=final_states,
+            bump_coords=bump_coords,
+            target_theta3=theta3,
+            slice_width=slice_width,
+        )
+        ax = fig.add_subplot(1, len(theta3s), col + 1, projection="3d")
+        axes.append(ax)
+
+        if embedding is None:
+            ax.set_title(f"\u03b8\u2083 = {theta3:.2f}\nnot enough data")
+            continue
+
+        ax.scatter(
+            embedding[:, 0], embedding[:, 1], embedding[:, 2],
+            color=point_color, alpha=point_alpha, s=point_size,
+        )
+        ax.set_title(f"\u03b8\u2083 = {theta3:.2f}")
+        ax.set_aspect("equal")
+        ax.view_init(elev=elev, azim=azim)
+
+    fig.suptitle(
+        "T\u00b3 CAN: PCA \u2192 Isomap visualizations of T\u00b2 slices",
+        fontsize=12,
+    )
+    plt.tight_layout()
+    return fig, axes
+

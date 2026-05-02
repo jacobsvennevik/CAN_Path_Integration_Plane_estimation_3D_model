@@ -1,8 +1,8 @@
 from made.manifolds import AbstractManifold, ParameterSpace, Range
 from made.metrics import Metric, PeriodicEuclidean
-from dataclasses import dataclass
-import numpy as np
 from dataclasses import dataclass, field
+import numpy as np
+
 
 
 class ParameterSpace3D(ParameterSpace):
@@ -29,7 +29,7 @@ class ParameterSpace3D(ParameterSpace):
             #My simple addition
             assert (
                 len(pads) == 3
-            ), "Incorrect number of pasd for manifold dimension"
+            ), f"Incorrect number of pasd for manifold dimension: {self.pads}"
             # Create meshgrid
             x = self.ranges[0].sample(n, pads[0]) # n points along theta_1
             y = self.ranges[1].sample(n, pads[1]) # n points along theta_2
@@ -77,7 +77,7 @@ class ParameterSpace3D(ParameterSpace):
             return np.column_stack((X.ravel(), Y.ravel(), Z.ravel()))
         else:
             #If other dimension use parent function
-            super().sample_with_spacing(spacing, pads) 
+            return super().sample_with_spacing(spacing, pads) 
 
 @dataclass
 class Torus3D(AbstractManifold):
@@ -103,5 +103,7 @@ class Torus3D(AbstractManifold):
         default_factory=lambda: PeriodicEuclidean(3, periodic=[True, True, True])
     )
     
-    
+
+
+
 
