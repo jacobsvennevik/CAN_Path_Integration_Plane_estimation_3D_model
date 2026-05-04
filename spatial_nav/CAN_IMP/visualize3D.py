@@ -17,6 +17,13 @@ import numpy as np
 from sklearn.decomposition import PCA
 from sklearn.manifold import Isomap
 
+# defined once
+SLICE_SPECS = [
+    (0, 1, 2, "θ₁", "θ₂"),
+    (1, 2, 0, "θ₂", "θ₃"),
+    (0, 2, 1, "θ₁", "θ₃"),
+]
+
 def _plot_slice(ax, X, Y, sl, ref_xy, xlabel, ylabel, title,
                 cmap, vmin, vmax, ref_color="black", ref_label="Selected neuron"):
     """
@@ -173,16 +180,9 @@ def _visualize_manifold_3d(mfld, show_distances=False, distance_point=None, cmap
     n = 50
     param_space = mfld.parameter_space
 
-    #lookup table for what is varying in each slice.
-    slice_specs = [
-        ((0, 1), 2, "theta_1", "theta_2"),
-        ((0, 2), 1, "theta_1", "theta_3"),
-        ((1, 2), 0, "theta_2", "theta_3"),
-    ]
-
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 
-    for ax_i, ((d0, d1), d_fixed, x_label, y_label) in zip(axes, slice_specs):
+    for ax_i, (d0, d1, d_fixed, x_label, y_label) in zip(axes, SLICE_SPECS):
 
         if show_distances:
             # picks points from the full 3D parameter space. Giving a complete grid (theta_1, theta_2, theta_3,)
@@ -424,3 +424,167 @@ def plot_isomap_slices(
     plt.tight_layout()
     return fig, axes
 
+def visualize_trajectory_3D(
+    traj1: np.ndarray,
+    traj2: np.ndarray = None,
+    title: str = "Trajectory",
+    slab_width: float = 0.5,   # radians; widen if slabs look too sparse
+):
+    """Visualize one or two T³ trajectories as 2D slices through the manifold.
+
+    Each panel fixes one angular dimension at the trajectory's midpoint value
+    and shows only points whose value of that dimension lies within
+    `slab_width` of the fixed value (using wrapped angular distance).
+    """
+
+    def _mask_wraps(x, threshold=np.pi):
+        x = x.copy().astype(float)
+        for col in range(x.shape[1]):
+            jumps = np.where(np.abs(np.diff(x[:, col])) > threshold)[0] + 1
+            x[jumps, col] = np.nan
+        return x
+
+    # Pick the slice anchor: midpoint of ground-truth trajectory
+    mid = len(traj1) // 2
+    fixed_vals = traj1[mid]   # [θ₁_mid, θ₂_mid, θ₃_mid]
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+    for ax, (d0, d1, d_fixed, xlabel, ylabel) in zip(axes, SLICE_SPECS):
+        fixed_val = fixed_vals[d_fixed]
+
+        # Build the slab mask FOR THIS PANEL — each panel fixes a different dim
+        mask = np.abs(wrapped_angle_diff(traj1[:, d_fixed], fixed_val)) < slab_width
+
+        if not np.any(mask):
+            ax.set_title(f"fix θ{d_fixed+1}={fixed_val:.2f}\n(no points in slab)")
+            continue
+
+        t_clean = _mask_wraps(traj1[mask])
+        d_clean = _mask_wraps(traj2[mask]) if traj2 is not None else None
+
+        ax.scatter(
+            t_clean[:, d0], t_clean[:, d1],
+            color="#2166ac", s=0.9, alpha=0.75, label="ground truth",
+        )
+        # Start marker — only meaningful if first point is in the slab
+        if mask[0]:
+            ax.scatter(traj1[0, d0], traj1[0, d1],
+                       color="#2166ac", s=40, zorder=5)
+
+        if d_clean is not None:
+            ax.scatter(
+                d_clean[:, d0], d_clean[:, d1],
+                color="#d6604d", lw=0.9, alpha=0.75,
+                linestyle="--", label="decoded",
+            )
+            if mask[0]:
+                ax.scatter(traj2[0, d0], traj2[0, d1],
+                           color="#d6604d", s=40, zorder=5)
+
+        panel_title = f"fix θ{d_fixed+1}={fixed_val:.2f}"
+        clean_axes(ax, title=panel_title, ylabel=ylabel)
+        ax.set_xlabel(xlabel)
+        ax.set_xlim(0, 2 * np.pi)
+        ax.set_ylim(0, 2 * np.pi)
+        ticks = [0, np.pi, 2 * np.pi]
+        ax.set_xticks(ticks); ax.set_xticklabels(["0", "π", "2π"])
+        ax.set_yticks(ticks); ax.set_yticklabels(["0", "π", "2π"])
+
+    axes[0].legend(fontsize=9, frameon=False)
+    fig.suptitle(title, y=1.02)
+    plt.tight_layout()
+    return fig, axes
+
+
+def visualize_qan_summary(traj1, traj2, qan, title="T³ QAN summary"):
+    """
+    Three-in-one diagnostic figure for a T³ QAN simulation.
+
+    Layout:
+        Top row    — coordinates vs time (one panel per θᵢ): tracking accuracy.
+        Bottom-left — decoding error vs time: quantitative correctness.
+        Bottom-right — 3D path in [0, 2π]³: geometric intuition.
+
+    Args:
+        traj1: ground truth trajectory, shape (n_steps, 3)
+        traj2: decoded trajectory,      shape (n_steps, 3)
+        qan:   the QAN instance (used to read `spacing` for the error reference line)
+        title: figure suptitle
+    """
+
+    # --- helpers --------------------------------------------------------------
+    def _mask_wraps(x, threshold=np.pi):
+        """Insert NaN at periodic boundary crossings, column-wise."""
+        x = x.copy().astype(float)
+        for col in range(x.shape[1]):
+            jumps = np.where(np.abs(np.diff(x[:, col])) > threshold)[0] + 1
+            x[jumps, col] = np.nan
+        return x
+
+    def _wrapped_diff(a, b, period=2 * np.pi):
+        """Signed angular distance from b to a, wrapped to (-π, π]."""
+        return (a - b + period / 2) % period - period / 2
+
+    # --- compute --------------------------------------------------------------
+    err = np.linalg.norm(_wrapped_diff(traj2, traj1), axis=1)
+    t_clean = _mask_wraps(traj1)
+    d_clean = _mask_wraps(traj2)
+    n_steps = len(traj1)
+    t_axis = np.arange(n_steps)
+
+    # --- layout ---------------------------------------------------------------
+    fig = plt.figure(figsize=(14, 8))
+    gs = fig.add_gridspec(2, 3, height_ratios=[1, 1.3], hspace=0.35, wspace=0.3)
+
+    # Top row: θᵢ vs time, one panel per dimension
+    coord_axes = []
+    for d in range(3):
+        ax = fig.add_subplot(gs[0, d])
+        ax.plot(t_axis, traj1[:, d],
+                color="#2166ac", lw=0.8, label="ground truth")
+        ax.plot(t_axis, traj2[:, d],
+                color="#d6604d", lw=0.8, ls="--", label="decoded")
+        ax.set_ylim(0, 2 * np.pi)
+        ax.set_yticks([0, np.pi, 2 * np.pi])
+        ax.set_yticklabels(["0", "π", "2π"])
+        ax.set_ylabel(f"θ{d+1}")
+        if d == 2:
+            ax.set_xlabel("time step")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        coord_axes.append(ax)
+    coord_axes[0].legend(fontsize=9, frameon=False, loc="upper left")
+
+    # Bottom-left (spans 2 columns): decoding error
+    ax_err = fig.add_subplot(gs[1, :2])
+    ax_err.plot(t_axis, err, color="black", lw=0.7)
+    ax_err.axhline(qan.spacing, ls="--", color="gray", lw=0.8,
+                   label=f"spacing = {qan.spacing}")
+    ax_err.set_xlabel("time step")
+    ax_err.set_ylabel("decoding error  (rad)")
+    ax_err.set_title(
+        f"mean = {err.mean():.3f},  max = {err.max():.3f}  rad",
+        fontsize=10,
+    )
+    ax_err.legend(fontsize=9, frameon=False)
+    ax_err.spines["top"].set_visible(False)
+    ax_err.spines["right"].set_visible(False)
+
+    # Bottom-right: 3D path
+    ax_3d = fig.add_subplot(gs[1, 2], projection="3d")
+    ax_3d.plot(t_clean[:, 0], t_clean[:, 1], t_clean[:, 2],
+               color="#2166ac", lw=0.6, alpha=0.7, label="ground truth")
+    ax_3d.plot(d_clean[:, 0], d_clean[:, 1], d_clean[:, 2],
+               color="#d6604d", lw=0.6, ls="--", alpha=0.7, label="decoded")
+    # Start markers
+    ax_3d.scatter(*traj1[0], color="#2166ac", s=30)
+    ax_3d.scatter(*traj2[0], color="#d6604d", s=30)
+    ax_3d.set_xlabel("θ₁"); ax_3d.set_ylabel("θ₂"); ax_3d.set_zlabel("θ₃")
+    ax_3d.set_xlim(0, 2 * np.pi)
+    ax_3d.set_ylim(0, 2 * np.pi)
+    ax_3d.set_zlim(0, 2 * np.pi)
+    ax_3d.set_title("3D path in [0, 2π]³", fontsize=10)
+
+    fig.suptitle(title, y=0.995, fontsize=13)
+    return fig, (coord_axes, ax_err, ax_3d)
