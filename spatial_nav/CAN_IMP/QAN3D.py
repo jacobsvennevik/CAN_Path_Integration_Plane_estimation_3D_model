@@ -55,16 +55,16 @@ class Torus3DQAN(QAN):
         theta[:, dim] += direction * offset_magnitude
         theta[:, dim] = np.mod(theta[:, dim], 2 * np.pi)
         return theta
-
-    def make_trajectory(self, n_steps: int = 1000) -> np.ndarray:
+    
+    def make_trajectory(self, n_steps: int = 1000, max_speed: float = 0.005 / np.sqrt(3)) -> np.ndarray:
         """Test path generation with incoomensurate rates. This means that trajectories never 
         repeats and thefore will cover T^3."""
-        trajectory = np.zeros((n_steps, self.manifold.dim))
-        t = np.linspace(0.25, 6 * np.pi - 0.25, n_steps)
-        trajectory[:, 0] = np.mod(t, 2 * np.pi)
-        trajectory[:, 1] = np.mod(2/3 * t, 2 * np.pi)
-        trajectory[:, 2] = np.mod(3/7 * t, 2 * np.pi)  # third incommensurate freq
-        return trajectory
+        t = np.linspace(0, max_speed * n_steps, n_steps)
+        traj = np.zeros((n_steps, self.manifold.dim))
+        traj[:, 0] = np.mod(t, 2 * np.pi)
+        traj[:, 1] = np.mod(np.sqrt(2)*t, 2 * np.pi)
+        traj[:, 2] = np.mod(np.sqrt(3)*t, 2 * np.pi)# third incommensurate freq
+        return traj
 
     def compute_theta_dot(
         self, theta: np.ndarray, theta_prev: np.ndarray

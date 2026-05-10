@@ -26,3 +26,7 @@ class CAN3D(CAN):
             raise ValueError(f"NaN values detected in new state.")
 
         return new_S
+    
+    @property
+    def weight_matrix(self) -> np.ndarray:
+        return self.connectivity_matrix
