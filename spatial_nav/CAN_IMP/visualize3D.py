@@ -78,9 +78,8 @@ def _scatter_plot(ax, X, Y, Z, ref_xy, xlabel, ylabel, title, cmap, vmin, vmax):
     
 def _format_torus_ax(ax, xlabel, ylabel):
     """Standard torus axis formating"""
-    ax.set_title(f"{xlabel} vs {ylabel}")
+    clean_axes(ax, title=f"{xlabel} vs {ylabel}", ylabel=ylabel)
     ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
     ax.set_xlim(0, 2 * np.pi)
     ax.set_ylim(0, 2 * np.pi)
     ax.set_xticks(_TORUS_TICKS)
