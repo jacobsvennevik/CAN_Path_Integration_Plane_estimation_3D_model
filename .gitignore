@@ -223,5 +223,5 @@ myenv/
 **/.ipynb_checkpoints/
 
 # Results / large outputs
-results/*.npz
-results/*.pklspatial_nav/notebooks/path_integration/results/
+results/*
+!results/.gitkeep

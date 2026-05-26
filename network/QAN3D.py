@@ -3,8 +3,8 @@ from made.manifolds import AbstractManifold
 from made.can import CAN
 from made.qan import QAN
 from made import manifolds
-from spatial_nav.CAN_IMP.CAN3D import CAN3D
-from spatial_nav.CAN_IMP import torus3D_manifold
+from network.CAN3D import CAN3D
+from network import torus3D_manifold
 import numpy as np
 
 

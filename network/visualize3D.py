@@ -11,7 +11,7 @@ This module provides functions to visualize:
 from made.can import CAN
 from made.qan import QAN
 from made.visuals import clean_axes
-from spatial_nav.CAN_IMP.metrics import wrapped_angle_diff
+from metrics import wrapped_angle_diff
 
 import matplotlib.pyplot as plt
 import numpy as np

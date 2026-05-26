@@ -2,14 +2,14 @@ import numpy as np
 import copy
 from typing import Optional
 
-from spatial_nav.plane_estimation import (
+from plane_estimation import (
     BinghamDistribution,
     predict,
     update,
     uniform_prior,
 )
 from scipy.spatial.transform import Rotation as Rot
-from spatial_nav.CAN_IMP.torch_backend import TorchBackend
+from network.torch_backend import TorchBackend
 
 
 def build_rotation_matrix(n_hat: np.ndarray, g: np.ndarray) -> np.ndarray:

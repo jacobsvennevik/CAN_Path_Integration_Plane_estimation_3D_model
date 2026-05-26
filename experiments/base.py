@@ -3,8 +3,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from spatial_nav.CAN_IMP.metrics import wrapped_angle_diff
-from spatial_nav.path_integration import PathIntegrator
+from metrics import wrapped_angle_diff
+from path_integration import PathIntegrator
 
 @dataclass
 class ExperimentResult:

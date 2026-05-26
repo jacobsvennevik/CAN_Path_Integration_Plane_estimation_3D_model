@@ -8,7 +8,7 @@ This project investigates how grid cells active during three-dimensional navigat
 The neuron grid model is from the generalized DREAM framework for deriving CAN models with any topology. We are implementing a T^3.
 
 For information about the implementasion of the project, both what I am currently working on and the implemented changes. Go to [docs/implementation/]
-The folder [spatial_nav/] contain the models, the plane estimation and path integration.
+The repo root contains `network/` (CAN/QAN primitives), `plane_estimation.py`, `path_integration.py`, and `experiments/` (simulation harness). Notebooks live under `notebooks/`; outputs go in `results/` (gitignored).
 
 
 REFERENCES:
