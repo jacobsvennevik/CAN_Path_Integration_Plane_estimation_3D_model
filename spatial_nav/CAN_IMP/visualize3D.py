@@ -11,6 +11,7 @@ This module provides functions to visualize:
 from made.can import CAN
 from made.qan import QAN
 from made.visuals import clean_axes
+from spatial_nav.CAN_IMP.metrics import wrapped_angle_diff
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -319,12 +320,6 @@ def visualize_can_state_3d(can, cmap="inferno"):
                                      plot_fn=_scatter_plot)
 
 
-def wrapped_angle_diff(a, b, period=2 * np.pi):
-    """
-    Since theta_i lives on the circle (is periodic) we need to calculate the angular distance.  
-    """
-    return (a - b + period / 2) % period - period / 2
-
 
 def isomap_slice(
     final_states,
@@ -440,7 +435,7 @@ def _break_periodic_jumps_2d(x, y, threshold=np.pi):
     return x_plot, y_plot
 
 
-def visualize_trajectory_projections_1(traj, decoded=None, title="T³ trajectory"):
+def visualize_trajectory_projections(traj, decoded=None, title="T³ trajectory"):
     """
     Plot the different slices, works like the rest of the code fixing one of the dimensions
     """
