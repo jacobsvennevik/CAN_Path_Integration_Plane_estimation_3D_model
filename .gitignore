@@ -224,4 +224,4 @@ myenv/
 
 # Results / large outputs
 results/*.npz
-results/*.pkl
+results/*.pklspatial_nav/notebooks/path_integration/results/
