@@ -17,6 +17,7 @@ class TorchBackend:
 
     qan: object                                  # Torus3DQAN instance
     torch_dtype: torch.dtype = torch.float32    #Uses cheeper float32 
+    dt:float = 0.1  
 
     device: torch.device = field(init=False)
     W:      torch.Tensor = field(init=False) #The six connectivity matrices

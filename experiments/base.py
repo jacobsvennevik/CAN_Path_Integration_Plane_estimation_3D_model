@@ -34,7 +34,7 @@ class ExperimentResult:
 class BaseExperiment:
     def __init__(self, qan, integrator_kwargs, record=True):
         self.qan = qan
-        self.integrator_kwargs = integrator_kwargs  # kappa, alpha, dt, scale
+        self.integrator_kwargs = integrator_kwargs  # kappa, alpha, scale
         self.record = record
 
     def run(self, world_pos, v_body_seq, torus_gt, g_vec) -> ExperimentResult:
@@ -117,7 +117,6 @@ class BaseConfig:
     seed:     int   = 0
     kappa:    float = 10.0
     alpha:    float = 0.999
-    dt:       float = 1.0
     target_speed_rad : float = 0.01 #how fast does the simulated animal walk on the torus
     speed:    float = field(init=False)   # derived in __post_init__
 

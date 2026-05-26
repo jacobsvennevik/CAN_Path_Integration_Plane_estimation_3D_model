@@ -2,8 +2,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from experiments.base import BaseExperiment, ExperimentResult, BaseConfig
-from path_integration import compute_pi_star_scale
+from spatial_nav.experiments.base import BaseExperiment, ExperimentResult
+from spatial_nav.path_integration import compute_pi_star_scale
+from spatial_nav.experiments.base import BaseConfig
 
 @dataclass
 class Arena2DConfig(BaseConfig):

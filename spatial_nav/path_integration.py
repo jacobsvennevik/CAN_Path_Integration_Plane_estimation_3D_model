@@ -2,14 +2,14 @@ import numpy as np
 import copy
 from typing import Optional
 
-from plane_estimation import (
+from spatial_nav.plane_estimation import (
     BinghamDistribution,
     predict,
     update,
     uniform_prior,
 )
 from scipy.spatial.transform import Rotation as Rot
-from network.torch_backend import TorchBackend
+from spatial_nav.CAN_IMP.torch_backend import TorchBackend
 
 
 def build_rotation_matrix(n_hat: np.ndarray, g: np.ndarray) -> np.ndarray:
@@ -37,7 +37,7 @@ def pi_star(v_alloc: np.ndarray) -> np.ndarray:
     return np.asarray(v_alloc, dtype=float)
 
 def step_filter(current, displacement, kappa, alpha):
-    """Single predict and update cycle."""
+    """Single predict and update cycle. """
     predicted = predict(current, alpha)
     return update(predicted, displacement, kappa)
 
@@ -88,9 +88,9 @@ class PathIntegrator:
         
         if d_norm > 1e-9:
             #we only want direction, not magnitude
-            v_body_t_unit = v_body / d_norm
+            v_body_unit = v_body / d_norm
             # run the bingham filter
-            self._bingham_state = step_filter(self._bingham_state, v_body_t_unit, self.kappa, self.alpha)
+            self._bingham_state = step_filter(self._bingham_state, v_body_unit, self.kappa, self.alpha)
 
 
         # Extract MAP estimate and disambiguate with gravity

@@ -196,6 +196,7 @@ def init_from_normal_guess(n_hat_guess, z1=-0.1, z2=-0.1):
     Z = np.diag([z1, z2, 0.0])
     return BinghamDistribution(M, Z)
 
+
 #TODO not working
 def flip_mode(b: BinghamDistribution) -> BinghamDistribution:
     """
