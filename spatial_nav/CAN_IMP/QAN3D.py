@@ -23,7 +23,7 @@ class Torus3DQAN(QAN):
     alpha: float = 0.8
     sigma: float = 1.5
     offset_magnitude: float = 0.25
-    beta: float = 1.25e2
+    velocity_gains: float = 1.25e2
     b: float = 1.6  # feedforward drive, passed to CAN3D
 
     def __post_init__(self):
@@ -84,5 +84,5 @@ class Torus3DQAN(QAN):
         """Maps the velocity to the correct CAN pairing."""
         dim = i // 2          # 0,0 → dim 0 | 1,1 → dim 1 | 2,2 → dim 2
         sign = 1 if i % 2 == 0 else -1
-        return sign * self.beta * theta_dot[dim]
+        return sign * self.velocity_gains * theta_dot[dim]
     

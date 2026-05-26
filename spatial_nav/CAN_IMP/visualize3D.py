@@ -440,7 +440,7 @@ def _break_periodic_jumps_2d(x, y, threshold=np.pi):
     return x_plot, y_plot
 
 
-def visualize_trajectory_projections(traj, decoded=None, title="T³ trajectory"):
+def visualize_trajectory_projections_1(traj, decoded=None, title="T³ trajectory"):
     """
     Plot the different slices, works like the rest of the code fixing one of the dimensions
     """
@@ -474,8 +474,10 @@ def visualize_trajectory_projections(traj, decoded=None, title="T³ trajectory")
             ax.scatter( decoded[0, d0], decoded[0, d1], color="#d6604d", s=40, zorder=5,
             )
 
-    _format_torus_ax(ax, xlabel, ylabel)
+        _format_torus_ax(ax, xlabel, ylabel)
 
     fig.suptitle(title, y=1.02)
     plt.tight_layout()
     return fig, axes
+
+

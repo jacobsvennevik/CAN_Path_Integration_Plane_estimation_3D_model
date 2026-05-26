@@ -17,15 +17,15 @@ class TorchBackend:
 
     qan: object                                  # Torus3DQAN instance
     torch_dtype: torch.dtype = torch.float32    #Uses cheeper float32 
+    dt:float = 0.1  
 
-    # filled by __post_init__
-    device:       torch.device = field(init=False)
-    W_torch:      torch.Tensor = field(init=False)
-    S_torch:      torch.Tensor = field(init=False)
-    coords_torch: torch.Tensor = field(init=False)
-    tau_torch:    torch.Tensor = field(init=False)
-    beta_torch:   torch.Tensor = field(init=False)
-    b_torch:      torch.Tensor = field(init=False)
+    device: torch.device = field(init=False)
+    W:      torch.Tensor = field(init=False) #The six connectivity matrices
+    S:      torch.Tensor = field(init=False) #The current neural activity
+    coords: torch.Tensor = field(init=False) #Torus coordinates
+    tau:    torch.Tensor = field(init=False) #Neural time constant
+    velocity_gain:   torch.Tensor = field(init=False) 
+    b: torch.Tensor = field(init=False) #bias term to produce activity in every neuron
 
     def __post_init__(self):
         self.device = self._get_torch_device()
@@ -53,13 +53,13 @@ class TorchBackend:
         N = cans[0].S.shape[0]
 
         # Creates empty space for all six connectivity matrices
-        self.W_torch = torch.empty(     # dont fill it, just finds space
+        self.W = torch.empty(     # dont fill it, just finds space
             (n_cans, N, N),             # (6, N, N)
             dtype=self.torch_dtype,
             device=self.device,
         )
         # empty space for activity states (current activity of all neurons)
-        self.S_torch = torch.empty(
+        self.S = torch.empty(
             (n_cans, N, 1),
             dtype=self.torch_dtype,
             device=self.device,
@@ -70,7 +70,7 @@ class TorchBackend:
             W_i = can.connectivity_matrix.astype(np.float32, copy=False)
             S_i = can.S.astype(np.float32, copy=False)
 
-            self.W_torch[i].copy_(
+            self.W[i].copy_(
                 torch.as_tensor(
                     W_i,
                     dtype=self.torch_dtype,
@@ -78,7 +78,7 @@ class TorchBackend:
                 )
             )
 
-            self.S_torch[i].copy_(
+            self.S[i].copy_(
                 torch.as_tensor(
                     S_i,
                     dtype=self.torch_dtype,
@@ -94,29 +94,29 @@ class TorchBackend:
             # Forces python to clean up
             gc.collect()
 
-        self.W_torch = self.W_torch.contiguous()
-        self.S_torch = self.S_torch.contiguous()
+        self.W = self.W.contiguous()
+        self.S = self.S.contiguous()
 
         # Go through each parameter used during simulation, make them into Torch tensors
-        self.tau_torch = torch.tensor(
+        self.tau = torch.tensor(
             cans[0].tau,
             dtype=self.torch_dtype,
             device=self.device,
         )
 
-        self.beta_torch = torch.tensor(
-            self.qan.beta,
+        self.velocity_gain = torch.tensor(
+            self.qan.velocity_gains,
             dtype=self.torch_dtype,
             device=self.device,
         )
 
-        self.b_torch = torch.tensor(
+        self.b = torch.tensor(
             self.qan.b,
             dtype=self.torch_dtype,
             device=self.device,
         )
         # Coordinates of each neuron
-        self.coords_torch = torch.tensor(
+        self.coords = torch.tensor(
             cans[0].neurons_coordinates.astype(np.float32),
             dtype=self.torch_dtype,
             device=self.device,
@@ -140,20 +140,7 @@ class TorchBackend:
             torch.mps.empty_cache()
         elif self.device.type == "cuda":
             torch.cuda.empty_cache()
-
-    def compute_can_inputs_torch(self, theta_dot: np.ndarray):
-        """
-        Maps the velocity theta_dot to the correct CAN pairing.
-        """
-        
-        td = torch.tensor(
-            theta_dot, #movement vector
-            dtype=self.torch_dtype,
-            device=self.device,
-        )
-
-        u = self.signs_torch * self.beta_torch * td[self.dims_torch] #The six velocity inputs
-        return u.view(6, 1, 1) #turns into right shape 
+            
 
     def reset(self, theta_0: np.ndarray, radius: float = 0.05):
         """
@@ -166,7 +153,7 @@ class TorchBackend:
             device=self.device,
         )
 
-        coords = self.coords_torch  # shape (N, 3)
+        coords = self.coords  # shape (N, 3)
 
         # compute difference between every neuron and theta_+
         diff = coords.unsqueeze(0) - theta.unsqueeze(1)
@@ -180,7 +167,7 @@ class TorchBackend:
         
         #Initiate an all zero acitivty state, one CAN activity vector.
         S0 = torch.zeros(
-            (self.coords_torch.shape[0], 1),
+            (self.coords.shape[0], 1),
             dtype=self.torch_dtype,
             device=self.device,
         )
@@ -188,46 +175,78 @@ class TorchBackend:
         S0[distances <= effective_radius] = 1.0
 
         #Copy that same starting bump into all six CANs.
-        self.S_torch = S0.unsqueeze(0).expand(len(self.qan.cans), -1, -1).clone()
+        self.S = S0.unsqueeze(0).expand(len(self.qan.cans), -1, -1).clone()
 
     def step(self, theta_dot: np.ndarray):
         """Compute S_tot internally and step."""
-        S_tot = torch.mean(self.S_torch, dim=0) #average activity acrosse CAN
-        return self.step_from_shared(S_tot, theta_dot)
+        S_tot = torch.mean(self.S, dim=0) #average activity acrosse CAN
+        return self.step_from_shared_state(S_tot, theta_dot)
 
-    def step_from_shared(
-        self, S_tot: torch.Tensor, theta_dot: np.ndarray, check_nan: bool = False,
-    ):
+    def step_from_shared_state(self, S_tot: torch.Tensor, theta_dot: np.ndarray,
+        check_nan: bool = False,
+    ) -> torch.Tensor:
         """
-        Update all CANs from a precomputed shared S_tot.
-
-        S_tot = the average neural activity across all six directional CANs. The average bump across the six CANs.
-        theta_dot = movement vector
+        Implements the bump updates driven by the velcoity using the shared mean neural state, the current neural activity S_tot. 
+        In this way we take a step, and the bump moves.
         """
-        #velcoity inputs, one scalar input pr CAN
-        u = self.compute_can_inputs_torch(theta_dot)
+        N = S_tot.shape[0]
 
-        #Reshapes so it matches the six-CAN tensor shape.
-        S_shared = S_tot.unsqueeze(0).expand_as(self.S_torch)             
-        Ws = torch.bmm(self.W_torch, S_shared) #batch matrix multiplication of the connecitivty matrices. 
+        #The current neural activity, gives us where the bump is currently
+        S_shared = S_tot.unsqueeze(0).expand(6, N, 1)
+        #Apply each CANs shifted weight matricies W to the shared bump of activity       
+        Ws = torch.bmm(self.W, S_shared)
+        # Apply the recurrent input to each neuron, 
+        # passed through a relu and shifted up by the bias b.
+        drives = torch.relu(Ws + self.b)               
 
-        #updates each CAN from its own previous state
-        self.S_torch = self.S_torch + (
-            torch.relu(Ws + u + self.b_torch) 
-            - self.S_torch
-        ) / self.tau_torch
+        #the normalised velocity vector
+        a = torch.tanh(self.velocity_gain * torch.tensor(theta_dot, dtype=torch.float32, device=self.device))
+        # blend weights, how much each CAN contributes                                                        
+        alpha_pos = (0.5 + 0.5 * a).view(3, 1, 1)              
+        alpha_neg = (0.5 - 0.5 * a).view(3, 1, 1)              
 
-        if check_nan and torch.isnan(self.S_torch).any().item():
+        drives_paired = drives.view(3, 2, N, 1)
+        #the weighted average of the forward and backward CAN drives for each dimension           
+        combined = (
+            alpha_pos * drives_paired[:, 0]                     
+        + alpha_neg * drives_paired[:, 1]                     
+        )                                                     
+        #Both CANs in each pair update toward the same target  
+        combined_targets = (
+            combined.unsqueeze(1)                                
+                    .expand(-1, 2, -1, -1)                     
+                    .reshape(6, N, 1)                          
+        )
+        #Updates the current neural state
+        self.S = self.S + (
+            combined_targets - self.S
+        ) / self.tau
+
+        if check_nan and torch.isnan(self.S).any().item():
             raise ValueError("NaN values detected in torch QAN state.")
-        return self.S_torch
 
+        return self.S
+
+    def decode_position(self, S_tot):
+        """Return current bump position on T³ as (3,) numpy array."""
+        #Most active neuron
+        max_idx = torch.argmax(S_tot)
+        return self.coords[max_idx].cpu().numpy()
+    
+    def decode_position_com(self, S_tot):
+        weights = torch.relu(S_tot).flatten()  # stay in torch
+        coords = self.coords             # (N, 3), already on device
+
+        sin_w = (torch.sin(coords) * weights.unsqueeze(1)).sum(dim=0)
+        cos_w = (torch.cos(coords) * weights.unsqueeze(1)).sum(dim=0)
+        result = torch.atan2(sin_w, cos_w) % (2 * torch.pi)
+        return result 
 
     def simulate(self, trajectory: np.ndarray) -> np.ndarray:
         """
         Simulate feeding a generated trajectory into the network. 
         Returning a decoded trajectory of the bump position at each timestep. 
         """
-        dT = 1 / 10 #Timestep scaling factor .. Check this
 
         theta_0 = trajectory[0, :].copy() 
         self.reset(theta_0, radius=0.05) #Puts the bump at the inital seed position
@@ -244,19 +263,16 @@ class TorchBackend:
                         theta.copy(),
                         trajectory[t - 1, :].copy(),
                     )
-                    * dT #scaled by dT
                 ).astype(np.float32)
 
             # compute the average activity of the CANs (cancels out the assymetry)
-            S_tot = torch.mean(self.S_torch, dim=0)
+            S_tot = torch.mean(self.S, dim=0)
 
             #Update activity state based on the average activity of previous step
-            self.step_from_shared(S_tot, theta_dot)
+            self.step_from_shared_state(S_tot, theta_dot)
 
-            #Most active neuron
-            max_idx = torch.argmax(S_tot)
             #Record where the bump is
-            decoded_trajectory.append(self.coords_torch[max_idx].detach())
+            decoded_trajectory.append(self.decode_position_com(S_tot))
 
         #the sequence of positions that the networks activity bump was at each timestep.
         out = torch.stack(decoded_trajectory, dim=0).cpu().numpy()
@@ -273,7 +289,6 @@ class TorchBackend:
 
         Useful when you only care about final CAN state.
         """
-        dT = 1 / 10
 
         theta_0 = trajectory[0, :].copy()
         self.reset(theta_0, radius=0.05)
@@ -287,18 +302,18 @@ class TorchBackend:
                         theta.copy(),
                         trajectory[t - 1, :].copy(),
                     )
-                    * dT
+                    * self.dt
                 ).astype(np.float32)
 
             self.step(theta_dot)
 
-        return self.S_torch
+        return self.S
 
     def sync_to_cans(self):
         """
         Copy torch states back into the individual CAN3D NumPy objects.
         """
-        S_np = self.S_torch.detach().cpu().numpy()
+        S_np = self.S.detach().cpu().numpy()
 
         for i, can in enumerate(self.qan.cans):
             can.S = S_np[i]
@@ -307,4 +322,21 @@ class TorchBackend:
         """
         Return current torch states as a NumPy array with shape (6, N, 1).
         """
-        return self.S_torch.detach().cpu().numpy()
+        return self.S.detach().cpu().numpy()
+    
+    def allocate_state_buffer(self, T: int) -> "torch.Tensor":
+        """Make room an on-device buffer for recording S_tot at each timestep."""
+        N = self.S.shape[1]
+        return torch.empty(
+            (T, N),
+            dtype=self.torch_dtype,
+            device=self.device,
+        )
+
+    def record_state_to_buffer(self, buf: "torch.Tensor", t: int) -> None:
+        """Write current S_tot into row t of the buffer. No CPU transfer."""
+        buf[t] = self.S.mean(dim=0).squeeze()
+
+    def buffer_to_numpy(self, buf: "torch.Tensor") -> "np.ndarray":
+        """Single CPU transfer of the full buffer."""
+        return buf.cpu().numpy()

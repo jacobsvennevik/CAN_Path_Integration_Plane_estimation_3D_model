@@ -1,3 +1,4 @@
+from logging import raiseExceptions
 import numpy as np
 from scipy.integrate import dblquad
 from scipy.optimize import fsolve
@@ -151,9 +152,9 @@ def run_bingham_filter(initial_estimate, measurements, kappa, alpha=0.999):
     estimates = []
     current = initial_estimate
     #loop over each displacement vector
-    for d_t in measurements:
+    for displacement in measurements:
         predicted = predict(current, alpha)      # mode fixed, Z deflated
-        current = update(predicted, d_t, kappa)  # accumulate displacement evidence
+        current = update(predicted, displacement, kappa)  # accumulate displacement evidence
         estimates.append(current)
  
     return estimates
@@ -186,7 +187,7 @@ def init_from_normal_guess(n_hat_guess, z1=-0.1, z2=-0.1):
     Weak prior centred on a guessed plane normal.
 
     Builds an orthonormal frame with n_hat_guess as the mode.
-    z1, z2 small negative -> weak prior. More negative -> more certain.
+    z1, z2 small negative means weak prior. More negative meanse more certain.
     """
 
     e1, e2, n_normalised = plane_axes(n_hat_guess)
@@ -194,3 +195,33 @@ def init_from_normal_guess(n_hat_guess, z1=-0.1, z2=-0.1):
     M = np.column_stack([e1, e2, n_normalised])  # last column is the mode
     Z = np.diag([z1, z2, 0.0])
     return BinghamDistribution(M, Z)
+
+#TODO not working
+def flip_mode(b: BinghamDistribution) -> BinghamDistribution:
+    """
+    Flip the mode of a Bingham distribution to its antipode.
+    """
+    M_flipped = np.column_stack([-b.M[:, 0], -b.M[:, 1], -b.M[:, 2]])
+    raise NotImplementedError("Now roking.")
+    return BinghamDistribution(M_flipped, b.Z.copy())
+
+
+def bingham_pdf_on_sphere(estimate, F, n_points=100):
+    """
+    Visulaisation helper
+    """
+    theta = np.linspace(0, np.pi,    n_points) #polar angles
+    phi   = np.linspace(0, 2*np.pi, n_points) #azimuthal angles
+    T, P  = np.meshgrid(theta, phi) #tile the sphere manifold with all possible pairings
+
+    #spherical coordinates to cartesian conversion
+    X = np.sin(T) * np.cos(P)
+    Y = np.sin(T) * np.sin(P)
+    Z = np.cos(T)
+
+    A    = estimate.M @ estimate.Z @ estimate.M.T
+    pts  = np.stack([X, Y, Z], axis=-1)
+    vals = np.einsum('ijk,kl,ijl->ij', pts, A, pts)
+    PDF  = np.exp(vals) / F
+
+    return X, Y, Z, PDF
