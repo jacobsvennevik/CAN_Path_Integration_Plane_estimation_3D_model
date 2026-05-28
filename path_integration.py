@@ -106,7 +106,8 @@ class PathIntegrator:
         v_alloc = R @ v_body #allocentric velocity
 
         # push-forward the roated velocity into the Jacobian matricies
-        target_speed_rad  = pi_star(v_alloc) * self.scale
+        v_phase = self.qan.manifold.metric.to_phase(pi_star(v_alloc))
+        target_speed_rad = v_phase * self.scale
 
         # drive each QAN
         self.backend.step(target_speed_rad )

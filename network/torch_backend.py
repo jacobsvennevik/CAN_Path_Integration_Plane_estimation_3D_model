@@ -5,6 +5,7 @@ For ligther runs just use the MADE framework and the QAN3D.py and CAN3D classes.
 
 import gc
 import numpy as np
+import math
 import torch
 from dataclasses import dataclass, field
 
@@ -38,6 +39,73 @@ class TorchBackend:
             return torch.device("cuda")
         else:
             return torch.device("cpu")
+        
+    def _compute_fft_kernels(self, n: int) -> torch.Tensor:
+        """
+        Analytically compute the pre-FFT'd recurrent kernel for each CAN.
+        Much faaster than original dense kernel.
+
+ 
+        Returns
+        -------
+        W_fft : torch.Tensor, shape (6, n, n, n//2+1), dtype complex64
+        """
+        alpha      = float(self.qan.alpha)
+        sigma      = float(self.qan.sigma)
+        offset_mag = float(self.qan.offset_magnitude)
+        TWO_PI     = 2.0 * math.pi
+
+        fft_device = torch.device("cpu") if self.device.type == "mps" else self.device
+        # Grid of torus coordinates in [0, 2π)³
+        idx   = torch.arange(n, dtype=torch.float32, device=fft_device)
+        g1, g2, g3 = torch.meshgrid(idx, idx, idx, indexing="ij")
+
+        # theta: shape (n, n, n, 3)
+        theta = torch.stack([g1, g2, g3], dim=-1) * (TWO_PI / n)
+ 
+        W_fft = torch.empty(
+        (6, n, n, n // 2 + 1), dtype=torch.complex64, device=fft_device
+        )
+ 
+        for i in range(6):
+            dim       = i // 2
+            direction = 1.0 if i % 2 == 0 else -1.0
+ 
+            # offset vector for this CAN
+            delta      = torch.zeros(3, dtype=torch.float32, device=fft_device)
+            delta[dim] = direction * offset_mag
+ 
+            # displacement  θ − δ,  wrapped to [−π, π]
+            disp = theta - delta.view(1, 1, 1, 3)          # (n, n, n, 3)
+            disp = (disp + math.pi) % TWO_PI - math.pi     # periodic wrap
+ 
+            # Euclidean distance on the torus
+            dist = torch.linalg.norm(disp, dim=-1)          # (n, n, n)
+ 
+            # kernel  k(d) = α exp(−d²/2σ²) − α
+            kernel = alpha * torch.exp(-dist.pow(2) / (2.0 * sigma ** 2)) - alpha
+ 
+            # store real-FFT of kernel
+            W_fft[i] = torch.fft.rfftn(kernel, dim=(-3, -2, -1))  
+            kernel = kernel / (n ** 3) 
+ 
+        return W_fft
+ 
+ 
+    def _apply_W_fft(self, S_shared: torch.Tensor) -> torch.Tensor:
+        n = self.n
+        N = n ** 3
+
+        S_3d = S_shared[0].squeeze(-1).reshape(n, n, n)
+
+        S_3d   = S_3d.cpu()
+        W_fft  = self.W_fft.cpu()
+
+        S_fft  = torch.fft.rfftn(S_3d, dim=(-3, -2, -1))
+        Ws_fft = W_fft * S_fft.unsqueeze(0)
+        Ws_3d  = torch.fft.irfftn(Ws_fft, s=(n, n, n), dim=(-3, -2, -1))
+
+        return Ws_3d.reshape(6, N, 1).to(self.device)
 
     def _init_torch_backend(self):
         """
@@ -50,13 +118,9 @@ class TorchBackend:
         # count CANs (should be 6) and neurons
         n_cans = len(cans)
         N = cans[0].S.shape[0]
+        self.n = int(round(N ** (1/3)))    
+        self.W_fft = self._compute_fft_kernels(self.n)
 
-        # Creates empty space for all six connectivity matrices
-        self.W = torch.empty(     # dont fill it, just finds space
-            (n_cans, N, N),             # (6, N, N)
-            dtype=self.torch_dtype,
-            device=self.device,
-        )
         # empty space for activity states (current activity of all neurons)
         self.S = torch.empty(
             (n_cans, N, 1),
@@ -66,16 +130,7 @@ class TorchBackend:
         
         # Copies one CAN at the time, converts into float32, then copies into Torch tensor
         for i, can in enumerate(cans):
-            W_i = can.connectivity_matrix.astype(np.float32, copy=False)
             S_i = can.S.astype(np.float32, copy=False)
-
-            self.W[i].copy_(
-                torch.as_tensor(
-                    W_i,
-                    dtype=self.torch_dtype,
-                    device=self.device,
-                )
-            )
 
             self.S[i].copy_(
                 torch.as_tensor(
@@ -84,16 +139,15 @@ class TorchBackend:
                     device=self.device,
                 )
             )
+            
 
             # After W_i is copied to torch, we no longer keep the dense NumPy matrices.
             if hasattr(can, "connectivity_matrix"):
                 del can.connectivity_matrix
-            del W_i
             del S_i
             # Forces python to clean up
             gc.collect()
 
-        self.W = self.W.contiguous()
         self.S = self.S.contiguous()
 
         # Go through each parameter used during simulation, make them into Torch tensors
@@ -193,7 +247,7 @@ class TorchBackend:
         #The current neural activity, gives us where the bump is currently
         S_shared = S_tot.unsqueeze(0).expand(6, N, 1)
         #Apply each CANs shifted weight matricies W to the shared bump of activity       
-        Ws = torch.bmm(self.W, S_shared)
+        Ws = self._apply_W_fft(S_shared)
         # Apply the recurrent input to each neuron, 
         # passed through a relu and shifted up by the bias b.
         drives = torch.relu(Ws + self.b)               

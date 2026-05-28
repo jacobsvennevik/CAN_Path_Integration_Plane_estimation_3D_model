@@ -1,8 +1,8 @@
 from made.manifolds import AbstractManifold, ParameterSpace, Range
-from made.metrics import Metric, PeriodicEuclidean
+from made.metrics import Metric
+from network.metric3D import HexagonalPeriodicMetric
 from dataclasses import dataclass, field
 import numpy as np
-
 
 
 class ParameterSpace3D(ParameterSpace):
@@ -100,7 +100,7 @@ class Torus3D(AbstractManifold):
     )
     # Computes shortest wrap-around distance between two points for all dimensions.
     metric: Metric = field(
-        default_factory=lambda: PeriodicEuclidean(3, periodic=[True, True, True])
+        default_factory=lambda: HexagonalPeriodicMetric(dim=3, period=2 * np.pi)
     )
     
 

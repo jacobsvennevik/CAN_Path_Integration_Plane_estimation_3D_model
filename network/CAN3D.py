@@ -13,7 +13,6 @@ class CAN3D(CAN):
         b (float): Constant feedforward excitatory drive.
     """
     b: float = 1.0
-
     def step_stateless(self, S, u=0):
         """
         Override function

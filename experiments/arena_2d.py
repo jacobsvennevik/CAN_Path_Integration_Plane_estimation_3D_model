@@ -5,9 +5,12 @@ import numpy as np
 from experiments.base import BaseExperiment, ExperimentResult, BaseConfig
 from path_integration import compute_pi_star_scale
 
+
 @dataclass
 class Arena2DConfig(BaseConfig):
-    pass
+    @property
+    def run_name(self) -> str:
+        return f"arena2d_T{self.n_steps}_kap{self.kappa}_seed{self.seed}"
 
 
 
@@ -53,10 +56,13 @@ class Arena2DExperiment(BaseExperiment):
             world_pos[t] = new_pos
             v_body_seq[t] = v
 
+        
+        metric = self.qan.manifold.metric
         # Switch meters in the real world to radians on the torus, to get the ground truth
         torus_gt = np.zeros((cfg.n_steps, 3))
-        torus_gt[:, 0] = (np.pi + world_pos[:, 0] * scale) % (2 * np.pi)
-        torus_gt[:, 1] = (np.pi + world_pos[:, 1] * scale) % (2 * np.pi)
+        phased = metric.to_phase(world_pos[:, :2] * scale)    # (T, 2)
+        torus_gt[:, 0] = (np.pi + phased[:, 0]) % (2 * np.pi)
+        torus_gt[:, 1] = (np.pi + phased[:, 1]) % (2 * np.pi)
         torus_gt[:, 2] = 0.0   # flat arena, θ₃ stays the same
 
         return world_pos, v_body_seq, torus_gt
