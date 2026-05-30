@@ -202,8 +202,8 @@ def flip_mode(b: BinghamDistribution) -> BinghamDistribution:
     """
     Flip the mode of a Bingham distribution to its antipode.
     """
-    M_flipped = np.column_stack([-b.M[:, 0], -b.M[:, 1], -b.M[:, 2]])
-    raise NotImplementedError("Now roking.")
+    M_flipped = b.M.copy()
+    M_flipped[:, -1] = -M_flipped[:, -1]
     return BinghamDistribution(M_flipped, b.Z.copy())
 
 

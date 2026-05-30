@@ -1,27 +1,30 @@
-from dataclasses import dataclass
-
 import numpy as np
+from dataclasses import asdict, dataclass
+from config import RunConfig, ExperimentConfig
+from experiments.base import BaseExperiment
+from network.QAN3D import Torus3DQAN
 
-from experiments.base import BaseExperiment, ExperimentResult, BaseConfig
-from path_integration import compute_pi_star_scale
-
-
-@dataclass
-class Arena2DConfig(BaseConfig):
+class Arena2DConfig(ExperimentConfig):
     @property
     def run_name(self) -> str:
         return f"arena2d_T{self.n_steps}_kap{self.kappa}_seed{self.seed}"
 
-
-
 class Arena2DExperiment(BaseExperiment):
-
-    def __init__(self, qan, config: Arena2DConfig, record=True):
-        self.scale = compute_pi_star_scale(config.env_size) #Scale of arena in the real world manifold to the torus manifold, meters to radians
-        integrator_kwargs = dict( 
-            kappa=config.kappa, #Bingham filter concentration 
-            alpha=config.alpha, #diffusion decay applied each step to the Bingham prior, 
-            scale=self.scale,
+    def __init__(self, config: RunConfig, record=True):
+        # QAN is built HERE, from config.network — not in the notebook
+        net = config.network
+        qan = Torus3DQAN(
+            spacing=net.spacing,
+            alpha=net.kernel_alpha,        # rename boundary: QAN still says 'alpha'
+            sigma=net.sigma,
+            b=net.b,
+            velocity_gains=net.velocity_gains,
+            offset_magnitude=net.offset_magnitude,
+        )
+        integrator_kwargs = dict(
+            kappa=config.experiment.kappa,
+            alpha=config.experiment.bingham_decay,   # Bingham, not network
+            scale=config.experiment.scale,
         )
         super().__init__(qan, integrator_kwargs, record)
         self.config = config
@@ -32,9 +35,10 @@ class Arena2DExperiment(BaseExperiment):
         Random walk in physical 2D space.
         Returns world_pos, v_body_seq, torus_gt, scale.
         """
-        rng = np.random.default_rng(self.config.seed)
-        cfg = self.config
-        scale = self.scale
+        cfg   = self.config.experiment          # was: self.config
+        rng   = np.random.default_rng(cfg.seed) # was: self.config.seed
+        scale = cfg.scale                        # was: self.scale (no longer exists)
+
 
         #Pre-allocate two arrays of zeroes in 3-dimensions
         world_pos  = np.zeros((cfg.n_steps, 3))
@@ -71,12 +75,5 @@ class Arena2DExperiment(BaseExperiment):
         world_pos, v_body_seq, torus_gt = self.generate_trajectory()
         result = self.run(world_pos, v_body_seq, torus_gt, g)
         result.condition = "arena_2d"
-        result.params = {
-            "env_size": self.config.env_size,
-            "speed":    self.config.speed,
-            "n_steps":  self.config.n_steps,
-            "kappa":    self.config.kappa,
-            "alpha":    self.config.alpha,
-            "scale":    self.scale,
-        }
+        result.params = asdict(self.config)
         return result
