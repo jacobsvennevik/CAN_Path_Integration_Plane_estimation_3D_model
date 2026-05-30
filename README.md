@@ -1,5 +1,6 @@
 # CAN_Path_Integration_Plane_estimation_3D_model
 
+Had to change the MADE package so its downlaoded locally for me ./.venv/lib/python3.14/site-packages/made/manifolds.py.
 
 SUMMARY:
 This project investigates how grid cells active during three-dimensional navigation can be locally ordered yet globally unordered. We propose that this loss of global order arises because path integration is performed relative to different noisy estimates of reference planes rather than a single global lattice. To test this hypothesis, we will extend the grid cell continuous attractor network (CAN) model of Fernández-León et al. (2022) into a plane-based “2.5D” model following Gong and Yu (2021). In this extension, velocity inputs are integrated relative to a reference plane, while place cells provide anchoring to limit drift accumulation. Changes in plane estimates are expected to keep the local grid structure while gradually disrupting the global grid organization. Experiments will be conducted using a simulated drone agent in three environments: a 2D baseline arena, a fully volumetric 3D environment, and a plane switching manifold. 
