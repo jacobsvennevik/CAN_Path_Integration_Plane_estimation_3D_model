@@ -476,3 +476,36 @@ def visualize_trajectory_projections(traj, decoded=None, title="T³ trajectory")
     return fig, axes
 
 
+def plot_pi_error(gt, decoded, title="Path-integration error"):
+    """
+    torus positions in RADIANS 
+    """
+    gt, decoded = np.asarray(gt), np.asarray(decoded)
+    if gt.min() < -1e-6 or decoded.min() < -1e-6:
+        print("WARNING: input looks like metres, not radians — pass torus_gt/theta_hist.")
+
+    err       = np.linalg.norm(wrapped_angle_diff(decoded, gt), axis=1)            # per-step error (rad)
+    dec_speed = np.linalg.norm(wrapped_angle_diff(decoded[1:], decoded[:-1]), 1)   # bump speed
+    gt_speed  = np.linalg.norm(wrapped_angle_diff(gt[1:],  gt[:-1]),  1)           # true speed
+
+    fig, ax = plt.subplots(1, 3, figsize=(15, 4))
+
+    ax[0].plot(err, color="#d6604d", lw=0.8)
+    ax[0].set(title="error over time", xlabel="timestep", ylabel="error (rad)")
+
+    ax[1].scatter(gt_speed, dec_speed, s=3, alpha=0.25, color="#2166ac")
+    lim = max(gt_speed.max(), dec_speed.max())
+    ax[1].plot([0, lim], [0, lim], "k--", lw=1, label="y = x (faithful)")
+    ax[1].set(title="decoded vs true phase-speed", xlabel="true (rad/step)",
+              ylabel="decoded (rad/step)"); ax[1].legend()
+
+    ax[2].hist(err, bins=50, color="#d6604d", alpha=0.8)
+    ax[2].set(title="error distribution", xlabel="error (rad)")
+
+    traj_len  = np.cumsum(gt_speed)
+    norm_made = np.mean(err[1:] / (traj_len + 1e-9))     # same metric as notebook 3
+    fig.suptitle(f"{title}  —  median {np.median(err):.3f} rad,  MADE {norm_made:.4f}", y=1.02)
+    plt.tight_layout()
+    return fig, ax
+
+
