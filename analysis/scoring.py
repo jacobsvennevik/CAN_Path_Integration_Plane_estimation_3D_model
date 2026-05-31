@@ -105,7 +105,7 @@ def scoring_input_from_npz(npz_path: str, n_neuron: int = 20000,
 
 
     return ScoringInput(
-        x=x, a=a[:, idx], cell_idx=idx,
+        x=x, a=a, cell_idx=idx,
         meta=dict(npz_path=npz_path, n_neuron=int(n_take), seed=int(seed),
                   norm=norm, n_active=int(active.sum()), n_total=int(S.shape[1])),
     )
