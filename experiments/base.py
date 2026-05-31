@@ -36,7 +36,7 @@ class BaseExperiment:
         integrator.reset(torus_gt[0])
         integrator.warmup(n_steps=100)   # let CAN stabilize, filter converge
 
-        theta_hist = integrator.run(v_body_seq, g_vec, record=self.record)
+        theta_hist = integrator.run(v_body_seq, g_vec, record=self.record, record_stride=cfg.experiment.record_stride)
 
         gap = np.array(integrator.history["z2"]) - np.array(integrator.history["z1"])
         n_hat_hist = np.array(integrator.history["n_hat"])
@@ -61,17 +61,21 @@ class BaseExperiment:
 
     def save(self, result: ExperimentResult, path: str):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        stride = (len(result.world_pos) // result.S_tot_buffer.shape[0]
+              if hasattr(result, "S_tot_buffer") and result.S_tot_buffer is not None
+              else 1)
         arrays = {
-            "world_pos":  result.world_pos,
-            "v_body_seq": result.v_body_seq,
-            "torus_gt":   result.torus_gt,
-            "theta_hist": result.theta_hist,
-            "n_hat_hist": result.n_hat_hist,
-            "gap_hist":   result.gap_hist,
-            "norm_error": result.norm_error,
+            "world_pos":     result.world_pos[::stride],   # strided to match S_tot_buffer
+            "torus_gt":      result.torus_gt[::stride],
+            "v_body_seq":    result.v_body_seq,
+            "theta_hist":    result.theta_hist,
+            "n_hat_hist":    result.n_hat_hist,
+            "gap_hist":      result.gap_hist,
+            "norm_error":    result.norm_error,
+            "record_stride": np.int32(stride),
         }
         if result.S_tot_buffer is not None:
-            arrays["S_tot_buffer"] = result.S_tot_buffer
+            arrays["S_tot_buffer"] = result.S_tot_buffer   # only added when recording
         np.savez(path, **arrays)
 
         # persist the full config so the run is reproducible

@@ -18,13 +18,14 @@ class Arena2DExperiment(BaseExperiment):
             alpha=net.kernel_alpha,        # rename boundary: QAN still says 'alpha'
             sigma=net.sigma,
             b=net.b,
-            velocity_gains=net.velocity_gains,
             offset_magnitude=net.offset_magnitude,
+            build_connectivity=net.build_connectivity,
         )
         integrator_kwargs = dict(
             kappa=config.experiment.kappa,
             alpha=config.experiment.bingham_decay,   # Bingham, not network
             scale=config.experiment.scale,
+            record_stride=config.experiment.record_stride, 
         )
         super().__init__(qan, integrator_kwargs, record)
         self.config = config

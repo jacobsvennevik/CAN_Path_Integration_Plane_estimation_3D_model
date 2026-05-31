@@ -4,13 +4,17 @@ import numpy as np
 @dataclass
 class NetworkConfig:
     """Everything Torus3DQAN needs."""
-    spacing:          float = 0.3    # radians between neighboring neurons on the torus (resolution)
-    kernel_alpha:    float = 1.5    # kernel amplitude
-    sigma:            float = 1.4    # kernel width
+    spacing:          float = 0.1    # radians between neighboring neurons on the torus (resolution)
+    # shap of the bump
+    kernel_alpha:    float = 0.498687    # kernel amplitude
+    sigma:            float = 1.347771   # kernel width
+    
+    #movement of the bump
     b:                float = 0.83   #Positive global exitasion to the whole network
-    velocity_gains:   float = 20 #how fast the animal is moving into how hard to push the bump. I
-    offset_magnitude: float = 0.25 #kernel offset: the ±shift applied to each CAN's connectivity
-
+    offset_magnitude: float = 0.349579 #kernel offset: the ±shift applied to each CAN's connectivity
+    
+    #flag related to building dense numoy matricies or skipping that
+    build_connectivity: bool  = True 
 @dataclass
 class ExperimentConfig:
     """Environment + Bingham filter."""
@@ -19,8 +23,9 @@ class ExperimentConfig:
     seed:             int   = 0
     kappa:            float = 10.0 #Bingham filter measurement strength:
     bingham_decay:    float = 0.999  #decay of certinity of the bingham filter
-    grid_spacing:     float = 0.3    # metres per full 2π wrap = the torus period
+    grid_spacing:     float = 0.48    # metres per full 2π wrap = the torus period
     target_speed_rad: float = 0.01   # desired bump speed, rad/step (the thing held fixed)
+    record_stride: int = 20 #How many recordings
     speed:            float = field(init=False)
     scale:            float = field(init=False)
 

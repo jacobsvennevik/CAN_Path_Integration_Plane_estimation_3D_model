@@ -12,6 +12,7 @@ from scipy.spatial.transform import Rotation as Rot
 from network.torch_backend import TorchBackend
 
 
+
 def build_rotation_matrix(n_hat: np.ndarray, g: np.ndarray) -> np.ndarray:
     """
     Builds the rotation matricies based in n_hat so that we can later rotate the velocity.
@@ -22,6 +23,32 @@ def build_rotation_matrix(n_hat: np.ndarray, g: np.ndarray) -> np.ndarray:
     z_hat = np.array([[0.0, 0.0, 1.0]])
     R, _ = Rot.align_vectors(z_hat, n_hat.reshape(1, 3))
     return R.as_matrix()
+
+def build_rotation_matrix(n_hat: np.ndarray, g: np.ndarray) -> np.ndarray:
+    """
+    Returns R such that R @ n_hat = z_hat, via the closed-form
+    vector-to-vector rotation (Rodrigues). 
+    """
+    n_hat = np.asarray(n_hat, dtype=float)
+    n_hat = n_hat / np.linalg.norm(n_hat)
+    z_hat = np.array([0.0, 0.0, 1.0])
+
+    v = np.cross(n_hat, z_hat)   # rotation axis * sin(theta)
+    c = float(np.dot(n_hat, z_hat))  # cos(theta)
+
+    # already aligned -> identity (this is the common case on a flat floor)
+    if c > 1.0 - 1e-10:
+        return np.eye(3)
+    # anti-aligned (n_hat points straight down) -> 180° flip
+    if c < -1.0 + 1e-10:
+        return np.diag([1.0, -1.0, -1.0])
+
+    vx = np.array([
+        [0.0,  -v[2],  v[1]],
+        [v[2],  0.0,  -v[0]],
+        [-v[1], v[0],  0.0 ],
+    ])
+    return np.eye(3) + vx + vx @ vx * (1.0 / (1.0 + c))
 
 def compute_pi_star_scale(env_size: float, torus_period: float = 2 * np.pi) -> float:
     """
@@ -47,7 +74,7 @@ class PathIntegrator:
     Path integrator coupling the Bingham plane filter with the
     T³ QAN.
     """
-    def __init__(self, qan, kappa=10.0, alpha=0.999, scale=1.0, initial_estimate=None,):
+    def __init__(self, qan, kappa=10.0, alpha=0.999, scale=1.0, initial_estimate=None, record_stride=10):
         self.qan = qan 
         self.kappa = kappa #likelihood consentration for the Bingham update.
         self.alpha = alpha #predict deflation factor
@@ -67,7 +94,8 @@ class PathIntegrator:
         # Optional recording buffers
         # S_tot_buffer: stays on-device (no per-step CPU transfer)
         self.S_tot_buffer      = None 
-        self.bingham_snapshots = None   
+        self.bingham_snapshots = None
+        self.record_stride = record_stride   
         
     def warmup(self, n_steps: int = 100):
         zero_v = np.zeros(3)
@@ -127,8 +155,7 @@ class PathIntegrator:
         return self._theta
 
 
-    def run(self, v_body_sequence : np.ndarray, g : np.ndarray, record: bool = False,
-            ) -> np.ndarray:
+    def run(self, v_body_sequence : np.ndarray, g : np.ndarray, record: bool = False) -> np.ndarray:
         """
         Run the full pipeline over a pre-computed velocity sequence.
 
@@ -138,7 +165,7 @@ class PathIntegrator:
         theta_history = np.zeros((T, self.qan.manifold.dim)) #place to store decoded positions
         
         if record:
-            _buf  = self.backend.allocate_state_buffer(T)
+            _buf  = self.backend.allocate_state_buffer(T, stride=self.record_stride)
             _bing = []
         else:
             _buf  = None
@@ -146,8 +173,8 @@ class PathIntegrator:
 
         for t in range(T):
             theta_history[t] = self.step(v_body_sequence[t], g)
-            if record:
-                self.backend.record_state_to_buffer(_buf, t)
+            if record and (t % self.record_stride== 0):
+                self.backend.record_state_to_buffer(_buf, t, stride=self.record_stride)
                 _bing.append(copy.deepcopy(self._bingham_state))
 
         if record:

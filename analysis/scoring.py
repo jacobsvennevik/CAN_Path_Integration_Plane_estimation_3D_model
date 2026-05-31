@@ -17,7 +17,7 @@ LIM = ((-1, 1), (-1, 1), (-1, 1))
 RAW_POS_KEY = "world_pos"
 RAW_ACT_KEY = "S_tot_buffer"
 
-BINS        = 40
+BINS        = 20
 AUTOCORR_TH = 0.1
 SMOOTH_SIGMA = 1.75
 

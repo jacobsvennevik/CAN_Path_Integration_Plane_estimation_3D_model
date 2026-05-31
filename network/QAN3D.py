@@ -23,8 +23,8 @@ class Torus3DQAN(QAN):
     alpha: float = 0.8
     sigma: float = 1.5
     offset_magnitude: float = 0.25
-    velocity_gains: float = 1.25e2
     b: float = 1.6  # feedforward drive, passed to CAN3D
+    build_connectivity: bool = True  #Flag for builing dense matrix or not
 
     def __post_init__(self):
         """Override to use CAN3D instead of CAN."""
@@ -37,6 +37,7 @@ class Torus3DQAN(QAN):
                         self.spacing,
                         self.alpha,
                         self.sigma,
+                        build_connectivity=self.build_connectivity,
                         b=self.b,               # passes tunable b
                         weights_offset=lambda x, d=d, direction=direction: (
                             self.coordinates_offset(
@@ -77,6 +78,10 @@ class Torus3DQAN(QAN):
             elif delta[d] < -np.pi:
                 delta[d] += 2 * np.pi
         return delta
+    
+    @property
+    def velocity_gains(self) -> float:
+        return self.manifold.dim * self.cans[0].tau / self.offset_magnitude      # self.cans[0], not self.can
 
     def compute_can_input(
         self, i: int, theta_dot: np.ndarray, theta: np.ndarray
@@ -84,5 +89,5 @@ class Torus3DQAN(QAN):
         """Maps the velocity to the correct CAN pairing."""
         dim = i // 2          # 0,0 → dim 0 | 1,1 → dim 1 | 2,2 → dim 2
         sign = 1 if i % 2 == 0 else -1
-        return sign * self.velocity_gains * theta_dot[dim]
+        return sign * self.velocity_gains * theta_dot[dim]      # ✓
     

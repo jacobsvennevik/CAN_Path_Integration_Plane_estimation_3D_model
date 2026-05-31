@@ -20,11 +20,9 @@ class TorchBackend:
     torch_dtype: torch.dtype = torch.float32    #Uses cheeper float32 
 
     device: torch.device = field(init=False)
-    W:      torch.Tensor = field(init=False) #The six connectivity matrices
     S:      torch.Tensor = field(init=False) #The current neural activity
     coords: torch.Tensor = field(init=False) #Torus coordinates
     tau:    torch.Tensor = field(init=False) #Neural time constant
-    velocity_gain:   torch.Tensor = field(init=False) 
     b: torch.Tensor = field(init=False) #bias term to produce activity in every neuron
 
     def __post_init__(self):
@@ -56,6 +54,7 @@ class TorchBackend:
         TWO_PI     = 2.0 * math.pi
 
         fft_device = torch.device("cpu") if self.device.type == "mps" else self.device
+        fft_device = torch.device("cpu") if self.device.type == "mps" else self.device
         # Grid of torus coordinates in [0, 2π)³
         idx   = torch.arange(n, dtype=torch.float32, device=fft_device)
         g1, g2, g3 = torch.meshgrid(idx, idx, idx, indexing="ij")
@@ -66,28 +65,24 @@ class TorchBackend:
         W_fft = torch.empty(
         (6, n, n, n // 2 + 1), dtype=torch.complex64, device=fft_device
         )
- 
+        #Hexagonal metric
+        metric = self.qan.manifold.metric
+        theta_grid = (np.indices((n, n, n)).reshape(3, -1).T) * (2*np.pi / n)
         for i in range(6):
             dim       = i // 2
             direction = 1.0 if i % 2 == 0 else -1.0
  
             # offset vector for this CAN
-            delta      = torch.zeros(3, dtype=torch.float32, device=fft_device)
-            delta[dim] = direction * offset_mag
- 
-            # displacement  θ − δ,  wrapped to [−π, π]
-            disp = theta - delta.view(1, 1, 1, 3)          # (n, n, n, 3)
-            disp = (disp + math.pi) % TWO_PI - math.pi     # periodic wrap
+            delta = np.zeros((1, 3)); delta[0, dim] = direction * offset_mag
  
             # Euclidean distance on the torus
-            dist = torch.linalg.norm(disp, dim=-1)          # (n, n, n)
+            dist  = metric(theta_grid, delta).reshape(n, n, n)
  
             # kernel  k(d) = α exp(−d²/2σ²) − α
-            kernel = alpha * torch.exp(-dist.pow(2) / (2.0 * sigma ** 2)) - alpha
+            kernel = alpha * np.exp(-dist**2 / (2*sigma**2)) - alpha
  
             # store real-FFT of kernel
-            W_fft[i] = torch.fft.rfftn(kernel, dim=(-3, -2, -1))  
-            kernel = kernel / (n ** 3) 
+            W_fft[i] = torch.fft.rfftn(torch.as_tensor(kernel, dtype=torch.float32), dim=(-3,-2,-1))
  
         return W_fft
  
@@ -98,8 +93,12 @@ class TorchBackend:
 
         S_3d = S_shared[0].squeeze(-1).reshape(n, n, n)
 
-        S_3d   = S_3d.cpu()
-        W_fft  = self.W_fft.cpu()
+        # Remove the .cpu() calls — stay on device for CUDA
+        if self.device.type == "mps":
+            S_3d  = S_3d.cpu()
+            W_fft = self.W_fft.cpu()
+        else:
+            W_fft = self.W_fft.to(self.device)  # already there after init, no-op
 
         S_fft  = torch.fft.rfftn(S_3d, dim=(-3, -2, -1))
         Ws_fft = W_fft * S_fft.unsqueeze(0)
@@ -157,12 +156,6 @@ class TorchBackend:
             device=self.device,
         )
 
-        self.velocity_gain = torch.tensor(
-            self.qan.velocity_gains,
-            dtype=self.torch_dtype,
-            device=self.device,
-        )
-
         self.b = torch.tensor(
             self.qan.b,
             dtype=self.torch_dtype,
@@ -171,12 +164,6 @@ class TorchBackend:
         # Coordinates of each neuron
         self.coords = torch.tensor(
             cans[0].neurons_coordinates.astype(np.float32),
-            dtype=self.torch_dtype,
-            device=self.device,
-        )
-        #direction signs
-        self.signs_torch = torch.tensor(
-            [1, -1, 1, -1, 1, -1],
             dtype=self.torch_dtype,
             device=self.device,
         )
@@ -252,8 +239,9 @@ class TorchBackend:
         # passed through a relu and shifted up by the bias b.
         drives = torch.relu(Ws + self.b)               
 
-        #the normalised velocity vector
-        a = torch.tanh(self.velocity_gain * torch.tensor(theta_dot, dtype=torch.float32, device=self.device))
+        # velocity blend coefficient — gain comes from the QAN's single-source property
+        a = torch.tanh(self.qan.velocity_gains
+               * torch.tensor(theta_dot, dtype=torch.float32, device=self.device))
         # blend weights, how much each CAN contributes                                                        
         alpha_pos = (0.5 + 0.5 * a).view(3, 1, 1)              
         alpha_neg = (0.5 - 0.5 * a).view(3, 1, 1)              
@@ -376,18 +364,19 @@ class TorchBackend:
         """
         return self.S.detach().cpu().numpy()
     
-    def allocate_state_buffer(self, T: int) -> "torch.Tensor":
+    def allocate_state_buffer(self, T: int, stride: int = 1) -> "torch.Tensor":
         """Make room an on-device buffer for recording S_tot at each timestep."""
         N = self.S.shape[1]
+        n_frames = (T + stride - 1) // stride
         return torch.empty(
-            (T, N),
+            (n_frames, N),
             dtype=self.torch_dtype,
-            device=self.device,
+            device="cpu",
         )
 
-    def record_state_to_buffer(self, buf: "torch.Tensor", t: int) -> None:
+    def record_state_to_buffer(self, buf: "torch.Tensor", t: int, stride: int = 1) -> None:
         """Write current S_tot into row t of the buffer. No CPU transfer."""
-        buf[t] = self.S.mean(dim=0).squeeze()
+        buf[t // stride] = self.S.mean(dim=0).squeeze().to(buf.device)
 
     def buffer_to_numpy(self, buf: "torch.Tensor") -> "np.ndarray":
         """Single CPU transfer of the full buffer."""
