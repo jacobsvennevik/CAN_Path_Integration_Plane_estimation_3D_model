@@ -40,7 +40,7 @@ class ScoringInput:
 
 def load_npz(npz_path: str) -> dict:
     """Read an .npz run file and return all arrays as a dict."""
-    d = np.load(npz_path)
+    d = np.load(npz_path, mmap_mode="r")
     return {k: np.asarray(d[k]) for k in d.files}
 
 
@@ -83,24 +83,26 @@ def scoring_input_from_npz(npz_path: str, n_neuron: int = 20000,
     world_pos = d[RAW_POS_KEY]     # (T, 3)
     S         = d[RAW_ACT_KEY]     # (T, N), non-negative
 
-    #1. Rescale positions to within [-1, 1]^3, preserving geometry
+    mn = S.min(0)    
+    mx = S.max(0)
+    
+    #1. Subsample from acitve neurons only
+    rng    = np.random.default_rng(seed)
+    active = (mx - mn) > active_thresh * mx.max()
+    active_idx = np.where(active)[0]
+    n_take = min(n_neuron, len(active_idx))
+    idx    = np.sort(rng.choice(active_idx, size=n_take, replace=False))  
+    
+    #2. Normalise activity to [0, 1] per neuron
+    S_sub = np.asarray(S[:, idx])
+    a, _, _ = _normalise_activity(S_sub, mode=norm)
+    #2. Rescale positions to within [-1, 1]^3, preserving geometry
     lo, hi = world_pos.min(0), world_pos.max(0)
     center = (hi + lo) / 2.0
     half   = np.max((hi - lo) / 2.0)
     half   = half if half > 0 else 1.0
     x = (world_pos - center) / half
 
-    #2. Normalise activity to [0, 1] per neuron
-    a, mn, mx = _normalise_activity(S, mode=norm)
-
-    #3. Subsample from acitve neurons only
-    # A neuron is active if its range exceeds 0.1 % of the population max.
-    # This prevents dead neurons entering analysis.
-    rng    = np.random.default_rng(seed)
-    active = (mx - mn) > active_thresh * mx.max()
-    active_idx = np.where(active)[0]
-    n_take = min(n_neuron, len(active_idx))
-    idx    = np.sort(rng.choice(active_idx, size=n_take, replace=False))
 
     return ScoringInput(
         x=x, a=a[:, idx], cell_idx=idx,
