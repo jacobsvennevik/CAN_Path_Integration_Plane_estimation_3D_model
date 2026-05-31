@@ -140,9 +140,7 @@ class PathIntegrator:
         # push-forward the roated velocity into the Jacobian matricies
         v_phase = self.qan.manifold.metric.to_phase(pi_star(v_alloc))
         target_speed_rad = v_phase * self.scale
-        
-        print(self.qan.manifold.metric.to_phase([[0., 1.]]))     # 2D  -> what ground truth uses
-        print(self.qan.manifold.metric.to_phase(np.array([[0., 1., 0.]])))  # 3D  -> what the integrator feeds
+         # 3D  -> what the integrator feeds
 
         # drive each QAN
         self.backend.step(target_speed_rad )
