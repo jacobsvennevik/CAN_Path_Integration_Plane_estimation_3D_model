@@ -131,12 +131,18 @@ class PathIntegrator:
 
         #build rotation matrix and rotate velocity 
         R = build_rotation_matrix(n_hat, g)
-       #v_alloc = R @ v_body #allocentric velocity
+        #v_alloc = R @ v_body #allocentric velocity
         v_alloc = v_body
+        if not getattr(self, "_fix_live", False):
+            print(">>> R-bypass is live"); self._fix_live = True
+    
 
         # push-forward the roated velocity into the Jacobian matricies
         v_phase = self.qan.manifold.metric.to_phase(pi_star(v_alloc))
         target_speed_rad = v_phase * self.scale
+        
+        print(self.qan.manifold.metric.to_phase([[0., 1.]]))     # 2D  -> what ground truth uses
+        print(self.qan.manifold.metric.to_phase(np.array([[0., 1., 0.]])))  # 3D  -> what the integrator feeds
 
         # drive each QAN
         self.backend.step(target_speed_rad )
