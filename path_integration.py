@@ -131,7 +131,8 @@ class PathIntegrator:
 
         #build rotation matrix and rotate velocity 
         R = build_rotation_matrix(n_hat, g)
-        v_alloc = R @ v_body #allocentric velocity
+       #v_alloc = R @ v_body #allocentric velocity
+        v_alloc = v_body
 
         # push-forward the roated velocity into the Jacobian matricies
         v_phase = self.qan.manifold.metric.to_phase(pi_star(v_alloc))
