@@ -26,17 +26,18 @@ class ExperimentResult:
 
 
 class BaseExperiment:
-    def __init__(self, qan, integrator_kwargs, record=True):
+    def __init__(self, qan, integrator_kwargs, record=True, record_stride=1):
         self.qan = qan
         self.integrator_kwargs = integrator_kwargs  # kappa, alpha, scale
         self.record = record
+        self.record_stride = record_stride
 
     def run(self, world_pos, v_body_seq, torus_gt, g_vec) -> ExperimentResult:
         integrator = PathIntegrator(qan=self.qan, **self.integrator_kwargs)
         integrator.reset(torus_gt[0])
         integrator.warmup(n_steps=100)   # let CAN stabilize, filter converge
 
-        theta_hist = integrator.run(v_body_seq, g_vec, record=self.record, record_stride=cfg.experiment.record_stride)
+        theta_hist = integrator.run(v_body_seq, g_vec, record=self.record)
 
         gap = np.array(integrator.history["z2"]) - np.array(integrator.history["z1"])
         n_hat_hist = np.array(integrator.history["n_hat"])

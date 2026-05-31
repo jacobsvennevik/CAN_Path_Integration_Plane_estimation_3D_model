@@ -24,10 +24,10 @@ class Arena2DExperiment(BaseExperiment):
         integrator_kwargs = dict(
             kappa=config.experiment.kappa,
             alpha=config.experiment.bingham_decay,   # Bingham, not network
-            scale=config.experiment.scale,
-            record_stride=config.experiment.record_stride, 
+            scale=config.experiment.scale, 
         )
-        super().__init__(qan, integrator_kwargs, record)
+        super().__init__(qan, integrator_kwargs, record,
+                 record_stride=config.experiment.record_stride)
         self.config = config
 
 
