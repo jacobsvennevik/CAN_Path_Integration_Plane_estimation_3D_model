@@ -74,7 +74,9 @@ class PathIntegrator:
     Path integrator coupling the Bingham plane filter with the
     T³ QAN.
     """
-    def __init__(self, qan, kappa=10.0, alpha=0.999, scale=1.0, initial_estimate=None, record_stride=10,plane_mode="bayesian"):
+    def __init__(self, qan, kappa=10.0, alpha=0.999, scale=1.0, 
+                 initial_estimate=None, record_stride=10,
+                 plane_mode="bayesian", true_n_hat = None):
         self.qan = qan 
         self.kappa = kappa #likelihood consentration for the Bingham update.
         self.alpha = alpha #predict deflation factor
@@ -127,12 +129,11 @@ class PathIntegrator:
             # run the bingham filter
             self._bingham_state = step_filter(self._bingham_state, v_body_t_unit, self.kappa, self.alpha)
 
-        #plane mode either bayesian or true
+        #plane mode either bayesian or true plane mode
         if self.plane_mode == "true":
             n_hat = self._true_n_hat
-            self._bingham_state = step_filter(self._bingham_state, v_body_t_unit, self.kappa, self.alpha)
-
-            # Extract MAP estimate and disambiguate with gravity
+        else:
+            # Bayesian: extract MAP estimate, disambiguate sign with gravity
             g_hat = g / np.linalg.norm(g)
             n_hat = self._bingham_state.M[:, -1]
             if np.dot(n_hat, g_hat) > 0:
