@@ -152,7 +152,7 @@ class PathIntegrator:
         self.history["z2"].append(self._bingham_state.z2)
         self.history["v_body"].append(v_body.copy())
         self.history["v_alloc"].append(v_alloc.copy())
-        self.history["target_speed_rad "].append(target_speed_rad .copy())
+        self.history["target_speed_rad"].append(target_speed_rad .copy())
         self.history["theta"].append(self._theta.copy())
 
         return self._theta
