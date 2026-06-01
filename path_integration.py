@@ -82,6 +82,7 @@ class PathIntegrator:
         self.backend = TorchBackend(qan) 
         self._bingham_state = initial_estimate or uniform_prior() #starting belief for n̂
         self._theta = np.zeros(qan.manifold.dim) #decoded position
+        self._initial_estimate = initial_estimate 
         self._n_hat_corrected = None  # gravity-disambiguated, stored on self
         self.history = {
             "n_hat": [], #MAP plane normal at each step
@@ -217,18 +218,15 @@ class PathIntegrator:
         Reset filter and CAN states without rebuilding the full object.
         For running multiple trials with the same QAN hyperparameters.
         """
-        if initial_estimate is None:
-            self._bingham_state = uniform_prior()
+        est = initial_estimate or self._initial_estimate
+        if est is not None:
+            self._bingham_state = est
         else:
-            self._bingham_state = initial_estimate
-
-        self.backend.reset(theta_0) 
-
-        self._theta = self._decode_from_torch()  
-
+            self._bingham_state = uniform_prior()
+        self.backend.reset(theta_0)
+        self._theta = self._decode_from_torch()
         for key in self.history:
             self.history[key] = []
-        
         self.S_tot_buffer      = None
         self.bingham_snapshots = None
 
