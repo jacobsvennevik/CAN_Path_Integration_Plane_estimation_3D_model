@@ -8,27 +8,11 @@ class Arena2DConfig(ExperimentConfig):
     @property
     def run_name(self) -> str:
         return f"arena2d_T{self.n_steps}_kap{self.kappa}_seed{self.seed}"
+    
 
 class Arena2DExperiment(BaseExperiment):
-    def __init__(self, config: RunConfig, record=True):
-        # QAN is built HERE, from config.network — not in the notebook
-        net = config.network
-        qan = Torus3DQAN(
-            spacing=net.spacing,
-            alpha=net.kernel_alpha,        # rename boundary: QAN still says 'alpha'
-            sigma=net.sigma,
-            b=net.b,
-            offset_magnitude=net.offset_magnitude,
-            build_connectivity=net.build_connectivity,
-        )
-        integrator_kwargs = dict(
-            kappa=config.experiment.kappa,
-            alpha=config.experiment.bingham_decay,   # Bingham, not network
-            scale=config.experiment.scale, 
-        )
-        super().__init__(qan, integrator_kwargs, record,
-                 record_stride=config.experiment.record_stride)
-        self.config = config
+
+    condition_label = "arena_2d"
         
     def generate_trajectory(self):
         """
@@ -71,9 +55,3 @@ class Arena2DExperiment(BaseExperiment):
 
         return world_pos, v_body_seq, torus_gt
     
-    def run_experiment(self, g):
-        world_pos, v_body_seq, torus_gt = self.generate_trajectory()
-        result = self.run(world_pos, v_body_seq, torus_gt, g)
-        result.condition = "arena_2d"
-        result.params = asdict(self.config)
-        return result

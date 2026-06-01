@@ -1,13 +1,14 @@
 import os
 import json
 import pickle
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 import numpy as np
 
 from metrics import wrapped_angle_diff
 from path_integration import PathIntegrator
 from config import world_to_flat_bins
+from network.QAN3D import Torus3DQAN
 
 
 @dataclass
@@ -29,13 +30,32 @@ class ExperimentResult:
 
 
 class BaseExperiment:
-    def __init__(self, qan, integrator_kwargs, record=True, record_stride=1):
-        self.qan = qan
-        self.integrator_kwargs = integrator_kwargs  # kappa, alpha, scale
-        self.record = record
-        self.record_stride = record_stride
+    condition_label = "base" #overwritten by subclasses
+    
+    def __init__(self, config, record=True, plane_mode="bayesian"):
+        net = config.network
+        self.qan = Torus3DQAN(
+            spacing=net.spacing,
+            alpha=net.kernel_alpha,        # QAN names the kernel amplitude 'alpha'
+            sigma=net.sigma,
+            b=net.b,
+            offset_magnitude=net.offset_magnitude,
+            build_connectivity=net.build_connectivity,
+        )
+        self.integrator_kwargs = dict(
+            kappa=config.experiment.kappa,
+            alpha=config.experiment.bingham_decay,   # Bingham decay, not the network's alpha
+            scale=config.experiment.scale,
+            plane_mode=plane_mode,                   # "bayesian" (default) or "true"
+        )
+        self.config        = config
+        self.record        = record
+        self.record_stride = config.experiment.record_stride
         
-
+    def generate_trajectory(self):
+        """Required hook: return (world_pos, v_body_seq, torus_gt)."""
+        raise NotImplementedError("Should be implemented by subclass")
+    
     def run(self, world_pos, v_body_seq, torus_gt, g_vec) -> ExperimentResult:
         bins = self.config.experiment.ratemap_bins
         flat = world_to_flat_bins(world_pos, self.config.experiment.env_size, bins)
@@ -115,4 +135,10 @@ class BaseExperiment:
         norm_error = err[1:] / (traj_length + 1e-9)
         return np.concatenate([[0.0], norm_error])
     
+    def run_experiment(self, g):
+        world_pos, v_body_seq, torus_gt = self.generate_trajectory()
+        result = self.run(world_pos, v_body_seq, torus_gt, g)
+        result.condition = "arena_2d"
+        result.params = asdict(self.config)
+        return result
     
