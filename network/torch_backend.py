@@ -24,6 +24,7 @@ class TorchBackend:
     coords: torch.Tensor = field(init=False) #Torus coordinates
     tau:    torch.Tensor = field(init=False) #Neural time constant
     b: torch.Tensor = field(init=False) #bias term to produce activity in every neuron
+    linear_drive: bool = False #test of thanh
 
     def __post_init__(self):
         self.device = self._get_torch_device()
@@ -239,8 +240,8 @@ class TorchBackend:
         drives = torch.relu(Ws + self.b)               
 
         # velocity blend coefficient — gain comes from the QAN's single-source property
-        a = torch.tanh(self.qan.velocity_gains
-               * torch.tensor(theta_dot, dtype=torch.float32, device=self.device))
+        arg = self.qan.velocity_gains * torch.tensor(theta_dot, dtype=torch.float32, device=self.device)
+        a = torch.clamp(arg, -1.0, 1.0) if self.linear_drive else torch.tanh(arg)
         # blend weights, how much each CAN contributes                                                        
         alpha_pos = (0.5 + 0.5 * a).view(3, 1, 1)              
         alpha_neg = (0.5 - 0.5 * a).view(3, 1, 1)              
