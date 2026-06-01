@@ -5,6 +5,8 @@ All of developed grid-field scoring code in one module, inheritance from G and Y
 from dataclasses import dataclass
 import numpy as np, torch
 
+from config import ExperimentConfig
+
 from . import gongyu_scoring as gy
 from scipy.spatial.distance import pdist
 from scipy.ndimage import gaussian_filter
@@ -17,6 +19,7 @@ LIM = ((-1, 1), (-1, 1), (-1, 1))
 RAW_POS_KEY = "world_pos"
 RAW_ACT_KEY = "S_tot_buffer"
 
+BINS = ExperimentConfig.ratemap_bins
 AUTOCORR_TH = 0.1
 SMOOTH_SIGMA = 1.75
 
