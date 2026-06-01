@@ -3,7 +3,6 @@ from dataclasses import asdict, dataclass
 from config import RunConfig, ExperimentConfig
 from experiments.base import BaseExperiment
 from network.QAN3D import Torus3DQAN
-from plane_estimation import init_from_normal_guess
 
 class Arena2DConfig(ExperimentConfig):
     @property
@@ -25,8 +24,7 @@ class Arena2DExperiment(BaseExperiment):
         integrator_kwargs = dict(
             kappa=config.experiment.kappa,
             alpha=config.experiment.bingham_decay,   # Bingham, not network
-            scale=config.experiment.scale,
-            initial_estimate = init_from_normal_guess([0., 0., 1.], z1=-100., z2=-100.), 
+            scale=config.experiment.scale, 
         )
         super().__init__(qan, integrator_kwargs, record,
                  record_stride=config.experiment.record_stride)
