@@ -24,6 +24,8 @@ class ExperimentResult:
     mean_norm_error:   float
     condition:         str
     params:            dict
+    ratemap_sums:      np.ndarray = None   
+    ratemap_counts:    np.ndarray = None
 
 
 class BaseExperiment:
