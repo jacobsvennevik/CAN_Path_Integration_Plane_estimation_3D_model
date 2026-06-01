@@ -138,7 +138,7 @@ class BaseExperiment:
     def run_experiment(self, g):
         world_pos, v_body_seq, torus_gt = self.generate_trajectory()
         result = self.run(world_pos, v_body_seq, torus_gt, g)
-        result.condition = "arena_2d"
+        result.condition = self.condition_label
         result.params = asdict(self.config)
         return result
     

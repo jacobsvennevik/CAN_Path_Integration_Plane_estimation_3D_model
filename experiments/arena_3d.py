@@ -1,16 +1,15 @@
 import numpy as np
 from dataclasses import asdict
-from experiments.arena_2d import Arena2DExperiment
+from experiments.arena_3d import BaseExperiment
 
 
-class Arena3DExperiment(Arena2DExperiment):
-    """
-    """
-
+class Arena3DExperiment(BaseExperiment):
+    condition_label = "arena_3d"
+    
     def __init__(self, config, record=True, plane_mode="true"):
         super().__init__(config, record)                  # QAN + integrator_kwargs from Arena2D
         self.integrator_kwargs["plane_mode"] = plane_mode  # flip the filter on/off
-        # true_n_hat defaults to [0, 0, 1] inside PathIntegrator
+        
 
     def generate_trajectory(self, turn_std: float = 0.1):
         cfg   = self.config.experiment

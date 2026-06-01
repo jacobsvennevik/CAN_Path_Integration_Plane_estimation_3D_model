@@ -74,7 +74,7 @@ class PathIntegrator:
     Path integrator coupling the Bingham plane filter with the
     T³ QAN.
     """
-    def __init__(self, qan, kappa=10.0, alpha=0.999, scale=1.0, initial_estimate=None, record_stride=10):
+    def __init__(self, qan, kappa=10.0, alpha=0.999, scale=1.0, initial_estimate=None, record_stride=10,plane_mode="bayesian"):
         self.qan = qan 
         self.kappa = kappa #likelihood consentration for the Bingham update.
         self.alpha = alpha #predict deflation factor
@@ -83,6 +83,11 @@ class PathIntegrator:
         self._bingham_state = initial_estimate or uniform_prior() #starting belief for n̂
         self._theta = np.zeros(qan.manifold.dim) #decoded position
         self._n_hat_corrected = None  # gravity-disambiguated, stored on self
+        self.plane_mode = plane_mode #whether to use the true plane mode or the Bingham mode
+        if true_n_hat is None:
+            true_n_hat = np.array([0.0, 0.0, 1.0])      # gravity / flat floor
+        true_n_hat = np.asarray(true_n_hat, dtype=float)
+        self._true_n_hat = true_n_hat / np.linalg.norm(true_n_hat)
         self.history = {
             "n_hat": [], #MAP plane normal at each step
             "z1": [], "z2": [], #concentration parameters
@@ -95,7 +100,7 @@ class PathIntegrator:
         # S_tot_buffer: stays on-device (no per-step CPU transfer)
         self.S_tot_buffer      = None 
         self.bingham_snapshots = None
-        self.record_stride = record_stride
+        self.record_stride = record_stride #TODO not in use anymore
         self.ratemap_sums   = None   # set by run(..., ratemap_bins=N) when > 0
         self.ratemap_counts = None   
         
@@ -122,12 +127,16 @@ class PathIntegrator:
             # run the bingham filter
             self._bingham_state = step_filter(self._bingham_state, v_body_t_unit, self.kappa, self.alpha)
 
+        #plane mode either bayesian or true
+        if self.plane_mode == "true":
+            n_hat = self._true_n_hat
+            self._bingham_state = step_filter(self._bingham_state, v_body_t_unit, self.kappa, self.alpha)
 
-        # Extract MAP estimate and disambiguate with gravity
-        g_hat = g / np.linalg.norm(g)
-        n_hat = self._bingham_state.M[:, -1]
-        if np.dot(n_hat, g_hat) > 0:
-            n_hat = -n_hat
+            # Extract MAP estimate and disambiguate with gravity
+            g_hat = g / np.linalg.norm(g)
+            n_hat = self._bingham_state.M[:, -1]
+            if np.dot(n_hat, g_hat) > 0:
+                n_hat = -n_hat
             
         self._n_hat_corrected = n_hat
 
