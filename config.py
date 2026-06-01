@@ -26,6 +26,7 @@ class ExperimentConfig:
     grid_spacing:     float = 0.48    # metres per full 2π wrap = the torus period
     target_speed_rad: float = 0.01   # desired bump speed, rad/step (the thing held fixed)
     record_stride: int = 20 #How many recordings
+    ratemap_bins: int = 40
     speed:            float = field(init=False)
     scale:            float = field(init=False)
 
@@ -40,3 +41,9 @@ class RunConfig:
     network:    NetworkConfig    = field(default_factory=NetworkConfig)
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
     # no spacing/grid_spacing assert: different unit systems, no reason to match
+    
+def world_to_flat_bins(world_pos, env_size, bins):
+    half = env_size / 2.0
+    xy = world_pos[:, :2] / half
+    ij = np.clip(np.floor((xy + 1.0) * 0.5 * bins).astype(np.int64), 0, bins - 1)
+    return ij[:, 0] * bins + ij[:, 1]

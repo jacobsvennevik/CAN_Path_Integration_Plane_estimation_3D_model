@@ -239,7 +239,7 @@ class TorchBackend:
         # passed through a relu and shifted up by the bias b.
         drives = torch.relu(Ws + self.b)               
 
-        # velocity blend coefficient — gain comes from the QAN's single-source property
+        # velocity blend, how fast the animal is moving and how fast the bump is moving
         arg = self.qan.velocity_gains * torch.tensor(theta_dot, dtype=torch.float32, device=self.device)
         a = torch.clamp(arg, -1.0, 1.0) if self.linear_drive else torch.tanh(arg)
         # blend weights, how much each CAN contributes                                                        

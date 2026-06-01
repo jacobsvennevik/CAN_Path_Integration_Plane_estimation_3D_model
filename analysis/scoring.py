@@ -17,7 +17,6 @@ LIM = ((-1, 1), (-1, 1), (-1, 1))
 RAW_POS_KEY = "world_pos"
 RAW_ACT_KEY = "S_tot_buffer"
 
-BINS        = 20
 AUTOCORR_TH = 0.1
 SMOOTH_SIGMA = 1.75
 
@@ -393,7 +392,9 @@ def score_2d(npz_path: str, n_neuron: int = 5000, seed: int = 0,
              norm: str = "divmax") -> dict:
     """End-to-end 2-D baseline: project to xy, score hexagonality.
 
-    Success: autocorrelation shows a 6-fold ring for most of the included neurons.
+    Sucess: autocorrelation shows a 6-fold ring for most of the included neurons.
+    
+    NOT IN USE ANYMORE
     """
     si = scoring_input_from_npz(npz_path, n_neuron=n_neuron, seed=seed, norm=norm)
     assert si.x[:, 2].std() < 1e-3, \

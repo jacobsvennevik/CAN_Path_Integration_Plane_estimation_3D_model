@@ -29,16 +29,15 @@ class Arena2DExperiment(BaseExperiment):
         super().__init__(qan, integrator_kwargs, record,
                  record_stride=config.experiment.record_stride)
         self.config = config
-
-
+        
     def generate_trajectory(self):
         """
         Random walk in physical 2D space.
         Returns world_pos, v_body_seq, torus_gt, scale.
         """
-        cfg   = self.config.experiment          # was: self.config
-        rng   = np.random.default_rng(cfg.seed) # was: self.config.seed
-        scale = cfg.scale                        # was: self.scale (no longer exists)
+        cfg   = self.config.experiment          
+        rng   = np.random.default_rng(cfg.seed) 
+        scale = cfg.scale                        
 
 
         #Pre-allocate two arrays of zeroes in 3-dimensions
@@ -71,7 +70,7 @@ class Arena2DExperiment(BaseExperiment):
         torus_gt[:, 2] = 0.0   # flat arena, θ₃ stays the same
 
         return world_pos, v_body_seq, torus_gt
-
+    
     def run_experiment(self, g):
         world_pos, v_body_seq, torus_gt = self.generate_trajectory()
         result = self.run(world_pos, v_body_seq, torus_gt, g)

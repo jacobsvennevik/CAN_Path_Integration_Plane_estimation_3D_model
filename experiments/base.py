@@ -7,6 +7,7 @@ import numpy as np
 
 from metrics import wrapped_angle_diff
 from path_integration import PathIntegrator
+from config import world_to_flat_bins
 
 
 @dataclass
@@ -31,13 +32,22 @@ class BaseExperiment:
         self.integrator_kwargs = integrator_kwargs  # kappa, alpha, scale
         self.record = record
         self.record_stride = record_stride
+        
 
     def run(self, world_pos, v_body_seq, torus_gt, g_vec) -> ExperimentResult:
+        bins = self.config.experiment.ratemap_bins
+        flat = world_to_flat_bins(world_pos, self.config.experiment.env_size, bins)
+        
         integrator = PathIntegrator(qan=self.qan, **self.integrator_kwargs)
         integrator.reset(torus_gt[0])
         integrator.warmup(n_steps=100)   # let CAN stabilize, filter converge
 
-        theta_hist = integrator.run(v_body_seq, g_vec, record=self.record)
+        theta_hist = integrator.run(
+            v_body_seq, g_vec, 
+            record=self.record,
+            flat_indices=flat,         
+            ratemap_bins=bins,     
+            )
 
         gap = np.array(integrator.history["z2"]) - np.array(integrator.history["z1"])
         n_hat_hist = np.array(integrator.history["n_hat"])
@@ -48,6 +58,8 @@ class BaseExperiment:
         return ExperimentResult(
             world_pos=world_pos,
             v_body_seq=v_body_seq,
+            ratemap_sums=integrator.ratemap_sums,       
+            ratemap_counts=integrator.ratemap_counts,
             torus_gt=torus_gt,
             theta_hist=theta_hist,
             n_hat_hist=n_hat_hist,
@@ -100,3 +112,5 @@ class BaseExperiment:
         err = np.linalg.norm(wrapped_angle_diff(decoded, ground_truth), axis=1)
         norm_error = err[1:] / (traj_length + 1e-9)
         return np.concatenate([[0.0], norm_error])
+    
+    
