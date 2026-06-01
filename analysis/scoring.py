@@ -3,7 +3,7 @@ All of developed grid-field scoring code in one module, inheritance from G and Y
 """
 
 from dataclasses import dataclass
-import numpy as np
+import numpy as np, torch
 
 from . import gongyu_scoring as gy
 from scipy.spatial.distance import pdist
@@ -497,3 +497,73 @@ def score_run(npz_path: str, n_neuron: int = 300, seed: int = 0,
     if global_order:
         out["go"] = go_out                       # orientation-invariant order score
     return out
+
+def run_with_online_ratemap(exp, g, bins=40, n_warmup=100, mode="integrate"):
+    """
+    Mmeory light run, so that the hughe buffers is not used and stride might not be needed.
+    """
+    integ, bk, cfg = exp.integrator, exp.integrator.backend, exp.config.experiment
+    dev, half = bk.device, cfg.env_size / 2.0
+
+    world_pos, v_body_seq, torus_gt = exp.generate_trajectory() 
+    T, N = world_pos.shape[0], bk.S.shape[1]
+
+    integ.reset(torus_gt[0])                       # bump at start + fresh filter + clear history
+    if mode == "integrate" and n_warmup:
+        integ.warmup(n_warmup)
+
+    # flat spatial-bin index for every step
+    xy   = world_pos[:, :2] / half                 # -> ~[-1, 1]
+    ij   = np.clip(np.floor((xy + 1.0) * 0.5 * bins).astype(np.int64), 0, bins - 1)
+    flat = (ij[:, 0] * bins + ij[:, 1]).tolist()
+
+    sums   = torch.zeros((bins * bins, N), dtype=torch.float32, device=dev)   # the accumulator
+    counts = torch.zeros(bins * bins,      dtype=torch.float32, device=dev)
+
+    theta_hist = np.zeros((T, 3), dtype=np.float32)
+    for t in range(T):
+        if mode == "integrate":
+            theta_hist[t] = integ.step(v_body_seq[t], g)     # filter + drive + decode (real path)
+        else:                                                # oracle
+            bk.reset(torus_gt[t]); theta_hist[t] = torus_gt[t]
+        s = bk.S.mean(dim=0).squeeze()                       # (N,) on device — no per-step CPU copy
+        b = flat[t]
+        sums[b] += s
+        counts[b] += 1.0
+
+    return dict(                                             # one CPU transfer, at the end
+        sums   = sums.cpu().numpy().reshape(bins, bins, N),
+        counts = counts.cpu().numpy().reshape(bins, bins),
+        bins=bins, world_pos=world_pos, torus_gt=torus_gt, theta_hist=theta_hist,
+    )
+
+
+def score_2d_from_map(sums, counts, sigma=1.75, n_neuron=5000, seed=0, active_thresh=1e-3):
+    """Score an accumulated rate map. Same autocorr + gridness as score_2d, no .npz needed."""
+    from analysis.scoring import autocorr2d, hex_gridness_2d
+    N = sums.shape[-1]
+
+    # drop dead/flat neurons from the summed map, then subsample (mirrors score_2d)
+    flat = sums.reshape(-1, N)
+    span = flat.max(0) - flat.min(0)
+    active_idx = np.where(span > active_thresh * (span.max() + 1e-12))[0]
+    take = min(n_neuron, len(active_idx))
+    idx  = np.sort(np.random.default_rng(seed).choice(active_idx, size=take, replace=False)) \
+           if take else np.array([], int)
+
+    denom = np.where(counts > 0, counts, 1.0)[..., None]
+    f = sums[..., idx] / denom                               # (bins, bins, take) — small after subsample
+    for c in range(f.shape[-1]):
+        f[..., c] = gaussian_filter(f[..., c], sigma=sigma)
+
+    ac  = autocorr2d(f)                                      # gridness is scale-invariant (it z-scores),
+    hgs = np.full(f.shape[-1], np.nan)                       # so no per-neuron divmax needed here
+    sgs = np.full(f.shape[-1], np.nan)
+    for k in range(f.shape[-1]):
+        hgs[k], sgs[k] = hex_gridness_2d(ac[..., k])
+
+    grid_like = np.isfinite(hgs) & (hgs > 0.3) & (sgs < hgs)
+    return dict(f=f, ac=ac, hgs=hgs, sgs=sgs, idx=idx,
+                ring_frac=float(np.isfinite(hgs).mean()) if len(hgs) else 0.0,
+                grid_like=grid_like, occupancy=float((counts > 0).mean()),
+                n_active=int(len(active_idx)))

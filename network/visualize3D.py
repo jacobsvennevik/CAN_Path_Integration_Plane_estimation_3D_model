@@ -477,35 +477,41 @@ def visualize_trajectory_projections(traj, decoded=None, title="T³ trajectory")
 
 
 def plot_pi_error(gt, decoded, title="Path-integration error"):
-    """
-    torus positions in RADIANS 
-    """
+    """torus positions in RADIANS"""
     gt, decoded = np.asarray(gt), np.asarray(decoded)
     if gt.min() < -1e-6 or decoded.min() < -1e-6:
-        print("WARNING: input looks like metres, not radians — pass torus_gt/theta_hist.")
+        print("WARNING: input looks like metres, not radians.")
 
-    err       = np.linalg.norm(wrapped_angle_diff(decoded, gt), axis=1)            # per-step error (rad)
-    dec_speed = np.linalg.norm(wrapped_angle_diff(decoded[1:], decoded[:-1]), 1)   # bump speed
-    gt_speed  = np.linalg.norm(wrapped_angle_diff(gt[1:],  gt[:-1]),  1)           # true speed
+    err = np.linalg.norm(wrapped_angle_diff(decoded, gt), axis=1)          
+    true_step = wrapped_angle_diff(gt[1:],      gt[:-1]).ravel()
+    dec_step  = wrapped_angle_diff(decoded[1:], decoded[:-1]).ravel()
+    gain = float((true_step @ dec_step) / (true_step @ true_step + 1e-12))  # LS slope thru origin
 
     fig, ax = plt.subplots(1, 3, figsize=(15, 4))
-
     ax[0].plot(err, color="#d6604d", lw=0.8)
     ax[0].set(title="error over time", xlabel="timestep", ylabel="error (rad)")
 
-    ax[1].scatter(gt_speed, dec_speed, s=3, alpha=0.25, color="#2166ac")
-    lim = max(gt_speed.max(), dec_speed.max())
-    ax[1].plot([0, lim], [0, lim], "k--", lw=1, label="y = x (faithful)")
-    ax[1].set(title="decoded vs true phase-speed", xlabel="true (rad/step)",
-              ylabel="decoded (rad/step)"); ax[1].legend()
+    ax[1].scatter(true_step, dec_step, s=2, alpha=0.12, color="#2166ac")
+    lim = np.abs(true_step).max() * 1.1
+    xs = np.linspace(-lim, lim, 50)
+    ax[1].plot(xs, xs, "k--", lw=1, label="y = x (faithful)")
+    ax[1].plot(xs, gain*xs, "r-", lw=1, label=f"fit slope = {gain:.3f}")
+    # binned mean reveals the SHAPE through decoder jitter (this is the tanh test)
+    nb = 15; edges = np.linspace(-lim, lim, nb+1); ctr = 0.5*(edges[:-1]+edges[1:])
+    idx = np.clip(np.digitize(true_step, edges)-1, 0, nb-1)
+    binned = np.array([dec_step[idx==k].mean() if (idx==k).any() else np.nan for k in range(nb)])
+    ax[1].plot(ctr, binned, "o-", color="#b2182b", ms=3, lw=1, label="binned mean")
+    ax[1].set(title="per-axis decoded vs true phase-step",
+              xlabel="true delta phase (rad/step)", ylabel="decoded delta phase (rad/step)"); ax[1].legend()
 
     ax[2].hist(err, bins=50, color="#d6604d", alpha=0.8)
     ax[2].set(title="error distribution", xlabel="error (rad)")
 
-    traj_len  = np.cumsum(gt_speed)
-    norm_made = np.mean(err[1:] / (traj_len + 1e-9))     # same metric as notebook 3
-    fig.suptitle(f"{title}  —  median {np.median(err):.3f} rad,  MADE {norm_made:.4f}", y=1.02)
-    plt.tight_layout()
-    return fig, ax
+    gt_speed = np.linalg.norm(wrapped_angle_diff(gt[1:], gt[:-1]), axis=1)
+    norm_made = float(np.mean(err[1:] / (np.cumsum(gt_speed) + 1e-9)))
+    med = float(np.median(err))
+    fig.suptitle(f"{title} — median {med:.3f} rad ({100*med/(2*np.pi):.1f}% of a period) | "
+                 f"gain {gain:.3f} | MADE {norm_made:.4f} (path-normalised, small by design)", y=1.02)
+    plt.tight_layout(); return fig, ax
 
 

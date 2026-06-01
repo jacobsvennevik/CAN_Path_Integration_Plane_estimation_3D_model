@@ -54,7 +54,6 @@ class TorchBackend:
         TWO_PI     = 2.0 * math.pi
 
         fft_device = torch.device("cpu") if self.device.type == "mps" else self.device
-        fft_device = torch.device("cpu") if self.device.type == "mps" else self.device
         # Grid of torus coordinates in [0, 2π)³
         idx   = torch.arange(n, dtype=torch.float32, device=fft_device)
         g1, g2, g3 = torch.meshgrid(idx, idx, idx, indexing="ij")
@@ -381,3 +380,26 @@ class TorchBackend:
     def buffer_to_numpy(self, buf: "torch.Tensor") -> "np.ndarray":
         """Single CPU transfer of the full buffer."""
         return buf.cpu().numpy()
+
+    def allocate_ratemap(self, bins: int) -> tuple:
+        """On-device accumulator for the 2-D per-neuron rate map.."""
+        N = self.S.shape[1]         
+        sums   = torch.zeros((bins * bins, N), dtype=torch.float32, device=self.device)
+        counts = torch.zeros( bins * bins,      dtype=torch.float32, device=self.device)
+        return sums, counts
+
+    def record_ratemap(self, acc: tuple, flat_bin: int) -> None:
+        """Accumulate current S_tot into bins (much cheeper and quicker).
+        The caller computes flat_bin so the backend stays unaware of arena geometry."""
+        sums, counts = acc
+        with torch.no_grad():            # belt-and-suspenders on MPS
+            sums[flat_bin] += self.S.mean(dim=0).squeeze()
+        counts[flat_bin] += 1.0
+
+    def ratemap_to_numpy(self, acc: tuple, bins: int) -> tuple:
+        """Single CPU transfer from ratemap to numpy"""
+        sums, counts = acc
+        return (
+            sums.cpu().numpy().reshape(bins, bins, -1),
+            counts.cpu().numpy().reshape(bins, bins),
+        )

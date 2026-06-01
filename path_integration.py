@@ -88,14 +88,16 @@ class PathIntegrator:
             "z1": [], "z2": [], #concentration parameters
             "v_body": [], #body velocity
             "v_alloc": [], #allocentric velocity after rotation
-            "target_speed_rad ": [], #push-forward velocity fed to CANs
+            "target_speed_rad": [], #push-forward velocity fed to CANs
             "theta": [] #decoded CAN position
             } 
         # Optional recording buffers
         # S_tot_buffer: stays on-device (no per-step CPU transfer)
         self.S_tot_buffer      = None 
         self.bingham_snapshots = None
-        self.record_stride = record_stride   
+        self.record_stride = record_stride
+        self.ratemap_sums   = None   # set by run(..., ratemap_bins=N) when > 0
+        self.ratemap_counts = None   
         
     def warmup(self, n_steps: int = 100):
         zero_v = np.zeros(3)
@@ -131,16 +133,12 @@ class PathIntegrator:
 
         #build rotation matrix and rotate velocity 
         R = build_rotation_matrix(n_hat, g)
-        #v_alloc = R @ v_body #allocentric velocity
-        v_alloc = v_body
-        if not getattr(self, "_fix_live", False):
-            print(">>> R-bypass is live"); self._fix_live = True
+        v_alloc = R @ v_body #allocentric velocity
     
 
         # push-forward the roated velocity into the Jacobian matricies
         v_phase = self.qan.manifold.metric.to_phase(pi_star(v_alloc))
         target_speed_rad = v_phase * self.scale
-         # 3D  -> what the integrator feeds
 
         # drive each QAN
         self.backend.step(target_speed_rad )
@@ -160,7 +158,8 @@ class PathIntegrator:
         return self._theta
 
 
-    def run(self, v_body_sequence : np.ndarray, g : np.ndarray, record: bool = False) -> np.ndarray:
+    def run(self, v_body_sequence : np.ndarray, g : np.ndarray, record: bool = False, 
+            flat_indices: np.ndarray = None,   ratemap_bins: int = 0) -> np.ndarray:
         """
         Run the full pipeline over a pre-computed velocity sequence.
 
@@ -175,12 +174,18 @@ class PathIntegrator:
         else:
             _buf  = None
             _bing = None
+            
+        _acc = None
+        if flat_indices is not None and ratemap_bins > 0:
+            _acc = self.backend.allocate_ratemap(ratemap_bins)
 
         for t in range(T):
             theta_history[t] = self.step(v_body_sequence[t], g)
             if record and (t % self.record_stride== 0):
                 self.backend.record_state_to_buffer(_buf, t, stride=self.record_stride)
                 _bing.append(copy.deepcopy(self._bingham_state))
+            if _acc is not None:              # ADD ── one line in the hot loop
+                self.backend.record_ratemap(_acc, int(flat_indices[t]))
 
         if record:
             self.S_tot_buffer      = self.backend.buffer_to_numpy(_buf)
@@ -188,6 +193,13 @@ class PathIntegrator:
         else:
             self.S_tot_buffer      = None
             self.bingham_snapshots = None
+        
+        if _acc is not None:
+            self.ratemap_sums, self.ratemap_counts = \
+            self.backend.ratemap_to_numpy(_acc, ratemap_bins)
+        else:
+            self.ratemap_sums = self.ratemap_counts = None
+            return theta_history
 
         return theta_history
 
