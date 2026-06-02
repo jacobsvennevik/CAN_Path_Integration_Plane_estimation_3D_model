@@ -8,8 +8,9 @@ all three.
 """
 import numpy as np
 
-from . import gongyu_scoring as gy        # when imported as part of the package
-         # when the module is on sys.path / in a notebook
+from . import gongyu_scoring as gy
+from config import AnalysisConfig, ExperimentConfig         
+
 
 STRUCT_TYPES = ("fcc", "hcp", "col", "rnd")
 _CHI_NAMES = ("fcc", "hcp", "col")            # the order chi_score returns
@@ -20,8 +21,8 @@ PROTO_ROTZ    = 8 * np.pi / 180     # CALIBRATED frame; chi_score's plane indice
 PROTO_SCALE   = 0.1                 # per-point Gaussian jitter when building the density
 PROTO_N_JIT   = 500                 # jitter replicates per lattice point
 PROTO_N_RND   = 100                 # points in the random (RND) baseline cloud
-PROTO_BINS    = 40                  # histogram bins per axis (== scoring.BINS)
-PROTO_TH      = 0.1                 # autocorrelation threshold (== scoring.AUTOCORR_TH)
+PROTO_BINS = ExperimentConfig.ratemap_bins
+PROTO_TH   = AnalysisConfig.autocorr_th
 
 
 def wrap(struct_type, r=PROTO_R, rotz=PROTO_ROTZ, n_jit=PROTO_N_JIT,

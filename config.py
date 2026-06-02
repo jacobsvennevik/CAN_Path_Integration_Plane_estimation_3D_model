@@ -29,12 +29,22 @@ class ExperimentConfig:
     ratemap_bins: int = 40
     speed:            float = field(init=False)
     scale:            float = field(init=False)
-
+    
     def __post_init__(self):
         self.scale = (2 * np.pi) / self.grid_spacing      # the metres→radians conversion from the world manifold to the tours manifold and visa versa
         self.speed = self.target_speed_rad / self.scale   #the physical walk speed of the animal in the arena
     def m_to_rad(self, x_m):   return x_m * self.scale
     def rad_to_m(self, x_rad): return x_rad / self.scale
+
+
+class AnalysisConfig:
+    """Offline scoring parameters — single source for the scoring pipeline."""
+    bins:            int   = 40     # histogram bins/axis for rate map + autocorrelogram
+    smooth_sigma:    float = 1.75   # gaussian_filter sigma, in BINS (see note below)
+    autocorr_th:     float = 0.1    # autocorrelation zeroing threshold
+    n_neuron:        int   = 300    # default cells subsampled by score_run
+    go_az_precision: int   = 48     # global-order azimuth samples
+    go_al_precision: int   = 24     # global-order altitude samples
 
 @dataclass
 class RunConfig:

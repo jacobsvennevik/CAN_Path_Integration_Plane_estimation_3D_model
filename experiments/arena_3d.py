@@ -1,8 +1,16 @@
 import numpy as np
 from dataclasses import asdict
-from experiments.arena_3d import BaseExperiment
+import numpy as np
+from dataclasses import asdict
+from config import ExperimentConfig
+from experiments.base import BaseExperiment
 
-
+class Arena3DConfig(ExperimentConfig):
+    @property
+    def run_name(self) -> str:
+        return f"arena3d_T{self.n_steps}_kap{self.kappa}_seed{self.seed}"
+    
+    
 class Arena3DExperiment(BaseExperiment):
     condition_label = "arena_3d"
     
