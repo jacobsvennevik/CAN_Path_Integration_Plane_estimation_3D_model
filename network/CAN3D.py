@@ -26,6 +26,7 @@ class CAN3D(CAN):
                 self.manifold.parameter_space.sample_with_spacing(self.spacing)
             )
             self.S = np.zeros((self.neurons_coordinates.shape[0], 1))
+
     def step_stateless(self, S, u=0):
         """
         Override function

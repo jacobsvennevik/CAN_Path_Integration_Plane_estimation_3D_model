@@ -52,6 +52,15 @@ class BaseExperiment:
         self.record        = record
         self.record_stride = config.experiment.record_stride
         
+        e = self.config.experiment
+        print(
+            f"[{self.condition_label}] "
+            f"neurons {self.qan.cans[0].S.shape[0]:,} "
+            f"arena {e.env_size} m | grid_spacing {e.grid_spacing} m | "
+            f"tilings {e.env_size / e.grid_spacing:.2f}"
+        )
+
+        
     def generate_trajectory(self):
         """Required hook: return (world_pos, v_body_seq, torus_gt)."""
         raise NotImplementedError("Should be implemented by subclass")

@@ -233,31 +233,36 @@ def angular_error_s2(est_mode, n_true):
     return np.rad2deg(np.arccos(dot))
 
 def plot_bingham_convergence(n_hat_hist, gap_hist, n_true,
-                             title="Bingham filter vs the arena's true floor normal (saved run)",
+                             title="",
                              figsize=(8, 5.5)):
     """
     Plot the recurrent Bingham plane filter over a run.
-
     """
 
-    err   = np.array([angular_error_s2(n, n_true) for n in n_hat_hist])
-    steps = np.arange(1, len(err) + 1)
-    
     n_hat_hist = np.asarray(n_hat_hist, dtype=float)
     gap_hist   = np.asarray(gap_hist,   dtype=float)
     n_true     = np.asarray(n_true,     dtype=float)
     n_true     = n_true / np.linalg.norm(n_true)
 
+    err   = np.array([angular_error_s2(n, n_true) for n in n_hat_hist])
+    steps = np.arange(1, len(err) + 1)
 
     fig, axes = plt.subplots(2, 1, figsize=figsize, sharex=True)
+
     axes[0].plot(steps, err, color="#d62728", lw=2)
     axes[0].axhline(0, color="k", lw=0.5, ls="--")
     axes[0].set_ylabel("angular error (deg)"); axes[0].set_ylim(bottom=0)
-    axes[0].set_title(title)
+    axes[0].set_title(title, pad=22)          # pad gives the new top axis room
     axes[0].grid(True, alpha=0.3, ls="--")
+
+    # mirrored time axis along the top of the upper panel
+    secax = axes[0].secondary_xaxis("top", functions=(lambda x: x, lambda x: x))
+    secax.set_xlabel("time step")
+
     axes[1].plot(steps, gap_hist, color="navy", lw=1.5)
     axes[1].set_ylabel("certainty  z₂−z₁"); axes[1].set_xlabel("time step")
     axes[1].set_title("Filter concentration (larger gap = more committed)")
     axes[1].grid(True, alpha=0.3, ls="--")
+
     fig.tight_layout()
     return fig, axes

@@ -13,7 +13,7 @@ from network.torch_backend import TorchBackend
 
 
 
-def build_rotation_matrix(n_hat: np.ndarray, g: np.ndarray) -> np.ndarray:
+def build_rotation_matrix_basic(n_hat: np.ndarray, g: np.ndarray) -> np.ndarray:
     """
     Builds the rotation matricies based in n_hat so that we can later rotate the velocity.
     """
@@ -49,12 +49,6 @@ def build_rotation_matrix(n_hat: np.ndarray, g: np.ndarray) -> np.ndarray:
         [-v[1], v[0],  0.0 ],
     ])
     return np.eye(3) + vx + vx @ vx * (1.0 / (1.0 + c))
-
-def compute_pi_star_scale(env_size: float, torus_period: float = 2 * np.pi) -> float:
-    """
-    Compute the scale of pi_star
-    """
-    return torus_period / env_size
 
 def pi_star(v_alloc: np.ndarray) -> np.ndarray:
     """
