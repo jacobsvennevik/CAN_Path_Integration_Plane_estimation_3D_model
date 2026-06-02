@@ -7,7 +7,7 @@ from network.QAN3D import Torus3DQAN
 class Arena2DConfig(ExperimentConfig):
     @property
     def run_name(self) -> str:
-        return f"arena2d_T{self.n_steps}_kap{self.kappa}_seed{self.seed}"
+        return f"arena2d_T{self.n_steps}_kap{self.kappa}_seed{self.seed}_envSize{self.env_size:}_gridSpacing{self.grid_spacing}"
     
 
 class Arena2DExperiment(BaseExperiment):
