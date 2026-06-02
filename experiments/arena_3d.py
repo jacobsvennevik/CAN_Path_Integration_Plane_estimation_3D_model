@@ -19,7 +19,7 @@ class Arena3DExperiment(BaseExperiment):
         self.integrator_kwargs["plane_mode"] = plane_mode  # flip the filter on/off
         
 
-    def generate_trajector(self, turn_std: float = 0.1):
+    def generate_trajectory(self, turn_std: float = 0.1):
         cfg   = self.config.experiment
         rng   = np.random.default_rng(cfg.seed)
         scale = cfg.scale
@@ -51,4 +51,5 @@ class Arena3DExperiment(BaseExperiment):
         torus_gt[:, 1] = (np.pi + phased[:, 1]) % (2 * np.pi)
         torus_gt[:, 2] = (np.pi + world_pos[:, 2] * scale) % (2 * np.pi)  # z is columnar not periodic TODO: watch out for this
         return world_pos, v_body_seq, torus_gt
+    
     
