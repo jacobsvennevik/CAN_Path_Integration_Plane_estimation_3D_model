@@ -16,6 +16,7 @@ import numpy as np
 import torch
 from scipy.ndimage import gaussian_filter
 from scipy.spatial.distance import pdist
+from scipy.signal import correlate
 
 from config import (
     AnalysisConfig, ExperimentConfig,
@@ -195,17 +196,17 @@ def autocorr2d(f: np.ndarray, th: float = AUTOCORR_TH) -> np.ndarray:
     -------
     ac : (2*bins-1, 2*bins-1, n), non-negative
     """
-    from scipy.signal import correlate
     if f.ndim == 2:
         f = f[..., None]
     n   = f.shape[0] * f.shape[1]
     std = f.std(axis=(0, 1))
-    std = np.where(std < 1e-10, 1.0, std)   # guard: zero-std, skip normalisation
+    std = np.where(std < 1e-10, 1.0, std)
     f_  = (f - f.mean(axis=(0, 1))) / std
     out = []
     for i in range(f.shape[-1]):
         ac = correlate(f_[..., i], f_[..., i], mode="full") / n
-        ac[ac < th] = 0.0
+        ac[ac < th] = 0.0          # suppress weak correlations (display threshold)
+        np.clip(ac, 0.0, None, out=ac)   # guarantee non-negative for gridness assert
         out.append(ac)
     return np.stack(out, axis=-1)
 
