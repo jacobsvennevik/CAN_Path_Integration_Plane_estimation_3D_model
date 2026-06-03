@@ -995,66 +995,74 @@ def run_and_score_3d(
 
     return {**raw, **scores, "grid_like": grid_like,
             "grid_like_method": grid_like_method}
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 4.  FIXED run_with_online_ratemap  (replaces broken version in scoring.py)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def run_with_online_ratemap(
-    exp,
-    g,
-    bins: int = 40,
-    n_warmup: int = 100,
-    mode: str = "integrate",
+    
+def score_2d_from_map(
+    sums: np.ndarray,
+    counts: np.ndarray,
+    *,
+    sigma: float = SMOOTH_SIGMA,
+    active_mask: np.ndarray | None = None,
+    occ_warn: float = 0.3,
 ) -> dict:
+    """Score a 2-D rate map already built by run_with_online_ratemap.
+
     """
-    2-D (XY projection) memory-light run.
+    bins    = sums.shape[0]
+    n_total = sums.shape[-1]
 
-    Fixed version of the broken function in scoring.py:
-      • Creates its own PathIntegrator (exp.integrator does not exist on
-        BaseExperiment).
-      • Routes 2-D binning through world_to_flat_bins (arena-anchored, same
-        convention as run_3d_online).
+    scored_idx = (np.where(active_mask)[0] if active_mask is not None
+                  else np.arange(n_total))
 
-    For 3-D structure scoring use run_3d_online + score_3d_from_map instead.
-    This function is only useful as a fast 2-D hexagonality sanity check.
-    """
-    cfg   = exp.config.experiment
+    f   = _rate_map_from_accumulator(sums[..., scored_idx], counts, sigma=sigma)
+    p   = counts / (counts.sum() + 1e-30)
+    occ = float((p > 0).mean())
 
-    # DO NOT access exp.integrator — create a new instance from integrator_kwargs.
-    integ = PathIntegrator(qan=exp.qan, **exp.integrator_kwargs)
-    bk    = integ.backend
-    dev   = getattr(bk, "device", torch.device("cpu"))
+    if occ < occ_warn:
+        warnings.warn(
+            f"score_2d_from_map: occupancy {occ:.1%} — map is sparse. "
+            f"HGS/ring results may reflect coverage rather than tuning.",
+            UserWarning, stacklevel=2,
+        )
 
-    world_pos, v_body_seq, torus_gt = exp.generate_trajectory()
-    T, N = world_pos.shape[0], bk.S.shape[1]
+    ac       = autocorr2d(f)          # (2*bins-1, 2*bins-1, n_scored)
+    n_scored = len(scored_idx)
+    hgs      = np.full(n_scored, np.nan)
+    sgs      = np.full(n_scored, np.nan)
+    for k in range(n_scored):
+        hgs[k], sgs[k] = hex_gridness_2d(ac[..., k])
 
-    integ.reset(torus_gt[0])
-    if mode == "integrate" and n_warmup:
-        integ.warmup(n_warmup)
-
-    # 2-D flat bin indices routed through config.world_to_flat_bins
-    # (arena-anchored, clips position before binning — same convention as 3-D path)
-    flat_2d = world_to_flat_bins(world_pos, cfg.env_size, bins)    # (T,) int64
-
-    sums   = torch.zeros((bins * bins, N), dtype=torch.float32, device=dev)
-    counts = torch.zeros(bins * bins,      dtype=torch.float32, device=dev)
-
-    theta_hist = np.zeros((T, 3), dtype=np.float32)
-    for t in range(T):
-        if mode == "integrate":
-            theta_hist[t] = integ.step(v_body_seq[t], g)
-        else:
-            bk.reset(torus_gt[t])
-            theta_hist[t] = torus_gt[t]
-        s = bk.S.mean(dim=0).squeeze()
-        b = int(flat_2d[t])
-        sums[b]   += s
-        counts[b] += 1.0
+    ring_found = np.isfinite(hgs)
+    grid_like  = ring_found & (hgs > 0.3)
 
     return dict(
-        sums=sums.cpu().numpy().reshape(bins, bins, N),
-        counts=counts.cpu().numpy().reshape(bins, bins),
-        bins=bins, world_pos=world_pos, torus_gt=torus_gt, theta_hist=theta_hist,
+        hgs        = hgs,
+        sgs        = sgs,
+        grid_like  = grid_like,
+        ring_frac  = float(ring_found.mean()),
+        sinfo      = _spatial_info(p, f),
+        sidx       = _sparsity_idx(p, f),
+        peak       = f.max(axis=(0, 1)),
+        occupancy  = occ,
+        n_active   = n_scored,
+        scored_idx = scored_idx,
+        bins       = bins,
     )
+    
+def run_and_score_2d(
+    exp,
+    g_vec: np.ndarray,
+    *,
+    bins: int = 40,
+    n_warmup: int = 100,
+    sigma: float = SMOOTH_SIGMA,
+    trajectory=None,
+) -> dict:
+    """One-shot: run_with_online_ratemap then score_2d_from_map.
+
+    The 2-D analogue of run_and_score_3d. Useful as a fast hexagonality
+    sanity check on a flat-floor run without needing the full 3-D pipeline.
+    """
+    raw    = run_with_online_ratemap(exp, g_vec, bins=bins,
+                                     n_warmup=n_warmup, trajectory=trajectory)
+    scores = score_2d_from_map(raw["sums"], raw["counts"], sigma=sigma)
+    return {**raw, **scores}
