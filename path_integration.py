@@ -71,7 +71,8 @@ class PathIntegrator:
     """
     def __init__(self, qan, kappa=10.0, alpha=0.999, scale=1.0, 
                  initial_estimate=None, record_stride=10,
-                 plane_mode="bayesian", true_n_hat = None):
+                 plane_mode="bayesian", true_n_hat = None,
+                 decode_chunk=4096):
         self.qan = qan 
         self.kappa = kappa #likelihood consentration for the Bingham update.
         self.alpha = alpha #predict deflation factor
@@ -85,6 +86,7 @@ class PathIntegrator:
             true_n_hat = np.array([0.0, 0.0, 1.0])      # gravity / flat floor
         true_n_hat = np.asarray(true_n_hat, dtype=float)
         self._true_n_hat = true_n_hat / np.linalg.norm(true_n_hat)
+        self.decode_chunk = int(decode_chunk) #how many steps to buffer on-device before decoding in one go
         self.history = {
             "n_hat": [], #MAP plane normal at each step
             "z1": [], "z2": [], #concentration parameters
@@ -170,11 +172,32 @@ class PathIntegrator:
         """
         Run the full pipeline over a pre-computed velocity sequence.
 
+        Same job as calling step() in a loop, but we skip the per-step decode
+        (that .cpu() call syncs the GPU every step) and skip the per-step list
+        appends (those fragment RAM on long runs). Instead we stash the bump
+        state on-device and decode a chunk at a time, and write history straight
+        into pre-allocated arrays. step() itself is left alone since the scoring
+        code drives the network through it.
         """
 
         T = v_body_sequence.shape[0] #total timesteps
-        theta_history = np.zeros((T, self.qan.manifold.dim)) #place to store decoded positions
-        
+        dim = self.qan.manifold.dim
+        dev = self.backend.device
+        N   = self.backend.S.shape[1]
+        theta_history = np.zeros((T, dim)) #place to store decoded positions
+
+        # history goes into flat arrays now, not growing lists
+        _h_n_hat   = np.empty((T, 3),   dtype=np.float64)
+        _h_z1      = np.empty(T,         dtype=np.float64)
+        _h_z2      = np.empty(T,         dtype=np.float64)
+        _h_v_body  = np.empty((T, 3),   dtype=np.float64)
+        _h_v_alloc = np.empty((T, 3),   dtype=np.float64)
+        _h_tsr     = np.empty((T, dim), dtype=np.float64)
+
+        # small on-device buffer, decode + dump to CPU once it fills (keeps memory bounded)
+        chunk = min(self.decode_chunk, T)
+        _S_chunk = torch.empty((chunk, N), dtype=torch.float32, device=dev)
+
         if record:
             _buf  = self.backend.allocate_state_buffer(T, stride=self.record_stride)
             _bing = []
@@ -197,8 +220,53 @@ class PathIntegrator:
         if n_shuffle > 0 and lags is not None and _acc is not None:
             _shuf = self.backend.allocate_shuffle_ratemap(total_bins, n_neurons, n_shuffle)
 
+        # g is fixed for the whole run, so normalise it once not every step
+        g = np.asarray(g, dtype=float)
+        g_hat = g / np.linalg.norm(g)
+
+        chunk_start = 0 #first step currently held in _S_chunk
+
         for t in range(T):
-            theta_history[t] = self.step(v_body_sequence[t], g)
+            # --- same per-step physics as step(), just without the decode/append ---
+            v_body = np.asarray(v_body_sequence[t], dtype=float)
+            d_norm = np.linalg.norm(v_body)
+
+            if d_norm > 1e-9:
+                #we only want direction, not magnitude
+                self._bingham_state = step_filter(self._bingham_state, v_body / d_norm, self.kappa, self.alpha)
+
+            #plane mode either bayesian or true plane mode
+            if self.plane_mode == "true":
+                n_hat = self._true_n_hat
+            else:
+                # Bayesian: extract MAP estimate, disambiguate sign with gravity
+                n_hat = self._bingham_state.M[:, -1]
+                if np.dot(n_hat, g_hat) > 0:
+                    n_hat = -n_hat
+            self._n_hat_corrected = n_hat
+
+            #build rotation matrix and rotate velocity
+            R = build_rotation_matrix(n_hat, g)
+            v_alloc = R @ v_body #allocentric velocity
+
+            # push-forward the roated velocity into the Jacobian matricies
+            v_phase = self.qan.manifold.metric.to_phase(pi_star(v_alloc))
+            target_speed_rad = v_phase * self.scale
+
+            # drive each QAN
+            self.backend.step(target_speed_rad)
+
+            # stash the bump state on-device, no .cpu() here
+            _S_chunk[t - chunk_start] = self.backend.S.mean(dim=0).squeeze()
+
+            # write history straight into the arrays
+            _h_n_hat[t]   = n_hat
+            _h_z1[t]      = self._bingham_state.z1
+            _h_z2[t]      = self._bingham_state.z2
+            _h_v_body[t]  = v_body
+            _h_v_alloc[t] = v_alloc
+            _h_tsr[t]     = target_speed_rad
+
             if _acc is not None:
                 self.backend.record_ratemap(_acc, int(flat_indices[t]), sub_t)
             if _shuf is not None:
@@ -206,6 +274,23 @@ class PathIntegrator:
             if record and (t % self.record_stride== 0):
                 self.backend.record_state_to_buffer(_buf, t, stride=self.record_stride)
                 _bing.append(copy.deepcopy(self._bingham_state))
+
+            # chunk full (or last step) -> decode it all at once and dump to CPU
+            filled = t - chunk_start + 1
+            if filled == chunk or t == T - 1:
+                theta_history[chunk_start:t + 1] = self._batch_decode(_S_chunk[:filled])
+                chunk_start = t + 1
+
+        self._theta = theta_history[-1] #last decoded position, same as before
+
+        # hand history back as the same dict-of-lists the rest of the code reads
+        self.history["n_hat"]            = list(_h_n_hat)
+        self.history["z1"]               = list(_h_z1)
+        self.history["z2"]               = list(_h_z2)
+        self.history["v_body"]           = list(_h_v_body)
+        self.history["v_alloc"]          = list(_h_v_alloc)
+        self.history["target_speed_rad"] = list(_h_tsr)
+        self.history["theta"]            = list(theta_history)
 
         if record:
             self.S_tot_buffer      = self.backend.buffer_to_numpy(_buf)
@@ -228,7 +313,20 @@ class PathIntegrator:
 
         return theta_history
 
-        return theta_history
+
+    def _batch_decode(self, S_chunk: torch.Tensor) -> np.ndarray:
+        """
+        Decode a whole chunk of bump states at once. Same circular-mean as
+        decode_position_com, just vectorised over the rows so we only touch the
+        CPU once per chunk instead of once per step.
+        """
+        coords  = self.backend.coords            # (N, 3), already on device
+        weights = torch.relu(S_chunk)            # (M, N)
+
+        sin_w = torch.einsum("mn,nd->md", weights, torch.sin(coords))
+        cos_w = torch.einsum("mn,nd->md", weights, torch.cos(coords))
+        result = torch.atan2(sin_w, cos_w) % (2 * torch.pi)
+        return result.detach().cpu().numpy()
 
 
     def concentration_eigenvalue_gap(self) -> float:

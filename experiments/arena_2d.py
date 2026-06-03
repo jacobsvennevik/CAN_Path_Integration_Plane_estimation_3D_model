@@ -13,6 +13,10 @@ class Arena2DConfig(ExperimentConfig):
 class Arena2DExperiment(BaseExperiment):
 
     condition_label = "arena_2d"
+    ratemap_ndim          = 2        
+    ratemap_n_sub         = 300      # blind random draw from the full N
+    ratemap_seed          = 0        # independent of cfg.seed; for reproducible subsample
+    ratemap_active_thresh = 1e-3     # inherited default, restated for visibility
         
     def generate_trajectory(self):
         """
