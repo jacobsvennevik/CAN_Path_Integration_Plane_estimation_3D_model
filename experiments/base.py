@@ -3,11 +3,12 @@ import json
 import pickle
 from dataclasses import dataclass, asdict
 
+
 import numpy as np
 
 from metrics import wrapped_angle_diff
 from path_integration import PathIntegrator
-from config import world_to_flat_bins
+from config import world_to_flat_bins, world_to_flat_bins_3d
 from network.QAN3D import Torus3DQAN
 
 
@@ -27,10 +28,18 @@ class ExperimentResult:
     params:            dict
     ratemap_sums:      np.ndarray = None   
     ratemap_counts:    np.ndarray = None
+    sub_idx: np.ndarray = None   # neuron subsample indices (3-D path)
+    shuf_sums:         np.ndarray = None   # (n_shuffle, bins, ..., n_sub) shuffle maps
+    active_mask:       np.ndarray = None   # (n_sub,) bool — neurons with non-trivial activity
 
 
 class BaseExperiment:
     condition_label = "base" #overwritten by subclasses
+    ratemap_ndim          = 2
+    ratemap_n_sub         = 0
+    ratemap_n_shuffle     = 0
+    ratemap_seed          = 0
+    ratemap_active_thresh = 1e-3
     
     def __init__(self, config, record=True, plane_mode="bayesian"):
         net = config.network
@@ -66,30 +75,65 @@ class BaseExperiment:
         raise NotImplementedError("Should be implemented by subclass")
     
     def run(self, world_pos, v_body_seq, torus_gt, g_vec) -> ExperimentResult:
-        bins = self.config.experiment.ratemap_bins
-        flat = world_to_flat_bins(world_pos, self.config.experiment.env_size, bins)
+        bins     = self.config.experiment.ratemap_bins
+        env_size = self.config.experiment.env_size
+        ndim     = self.ratemap_ndim
+        
+        if ndim == 3:
+            flat = world_to_flat_bins_3d(world_pos, env_size, bins)
+        else:
+            flat = world_to_flat_bins(world_pos, env_size, bins)
         
         integrator = PathIntegrator(qan=self.qan, **self.integrator_kwargs)
         integrator.reset(torus_gt[0])
         integrator.warmup(n_steps=100)   # let CAN stabilize, filter converge
+        
+        # neuron subsample + shuffle lags (one RNG, sequential draws)
+        N   = integrator.backend.S.shape[1]
+        rng = np.random.default_rng(self.ratemap_seed)
 
+        sub_idx = None
+        if self.ratemap_n_sub > 0:
+            sub_idx = np.sort(rng.choice(N, size=min(self.ratemap_n_sub, N),
+                                         replace=False))
+
+        lags = None
+        n_shuffle = self.ratemap_n_shuffle
+        if n_shuffle > 0:
+            T       = len(world_pos)
+            min_lag = max(1, int(T * 0.1))
+            if min_lag < T:
+                lags = rng.integers(min_lag, T, size=n_shuffle)
+            else:
+                n_shuffle = 0          # trajectory too short for shuffles
+        
         theta_hist = integrator.run(
-            v_body_seq, g_vec, 
+            v_body_seq, g_vec,
             record=self.record,
-            flat_indices=flat,         
-            ratemap_bins=bins,     
-            )
+            flat_indices=flat,
+            ratemap_bins=bins,
+            ratemap_ndim=ndim,
+            sub_idx=sub_idx,
+            n_shuffle=n_shuffle if lags is not None else 0,
+            lags=lags,
+        )
 
         gap = np.array(integrator.history["z2"]) - np.array(integrator.history["z1"])
         n_hat_hist = np.array(integrator.history["n_hat"])
         norm_error = self._made_metric(theta_hist, torus_gt, world_pos=world_pos)
+        
+        active_mask = None
+        if sub_idx is not None and integrator.ratemap_sums is not None:
+            sums_flat   = integrator.ratemap_sums.reshape(-1, integrator.ratemap_sums.shape[-1])
+            span        = sums_flat.max(0) - sums_flat.min(0)
+            active_mask = span > self.ratemap_active_thresh * (span.max() + 1e-12)
 
         self.last_integrator = integrator
-
+        #Mostly doing online now so might not need this below anymore TODO
         return ExperimentResult(
             world_pos=world_pos,
             v_body_seq=v_body_seq,
-            ratemap_sums=integrator.ratemap_sums,       
+            ratemap_sums=integrator.ratemap_sums,
             ratemap_counts=integrator.ratemap_counts,
             torus_gt=torus_gt,
             theta_hist=theta_hist,
@@ -99,9 +143,13 @@ class BaseExperiment:
             bingham_snapshots=integrator.bingham_snapshots,
             norm_error=norm_error,
             mean_norm_error=float(norm_error[1:].mean()),
-            condition="",      # filled by subclass
-            params={},         # filled by subclass
+            condition="",
+            params={},
+            sub_idx=sub_idx,
+            shuf_sums=integrator.ratemap_shuf_sums,
+            active_mask=active_mask,
         )
+        
 
     def save(self, result: ExperimentResult, path: str):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

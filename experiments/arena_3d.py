@@ -13,6 +13,9 @@ class Arena3DConfig(ExperimentConfig):
     
 class Arena3DExperiment(BaseExperiment):
     condition_label = "arena_3d"
+    ratemap_ndim      = 3
+    ratemap_n_sub     = 300
+    ratemap_n_shuffle = 20
     
     def __init__(self, config, record=True, plane_mode="true"):
         super().__init__(config, record)                  # QAN + integrator_kwargs from Arena2D

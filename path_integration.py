@@ -1,6 +1,7 @@
 import numpy as np
 import copy
 from typing import Optional
+import torch
 
 from plane_estimation import (
     BinghamDistribution,
@@ -162,8 +163,10 @@ class PathIntegrator:
         return self._theta
 
 
-    def run(self, v_body_sequence : np.ndarray, g : np.ndarray, record: bool = False, 
-            flat_indices: np.ndarray = None,   ratemap_bins: int = 0) -> np.ndarray:
+    def run(self, v_body_sequence: np.ndarray, g: np.ndarray, record: bool = False,
+            flat_indices: np.ndarray = None, ratemap_bins: int = 0,
+            ratemap_ndim: int = 2, sub_idx: np.ndarray = None,
+            n_shuffle: int = 0, lags: np.ndarray = None) -> np.ndarray:
         """
         Run the full pipeline over a pre-computed velocity sequence.
 
@@ -178,18 +181,31 @@ class PathIntegrator:
         else:
             _buf  = None
             _bing = None
+        
+                # neuron subsample → torch index tensor
+        sub_t = (torch.tensor(sub_idx, dtype=torch.long, device=self.backend.device)
+                 if sub_idx is not None else None)
+        n_neurons = len(sub_idx) if sub_idx is not None else self.backend.S.shape[1]
             
+        # rate-map accumulator (2-D or 3-D)
         _acc = None
         if flat_indices is not None and ratemap_bins > 0:
-            _acc = self.backend.allocate_ratemap(ratemap_bins)
+            total_bins = ratemap_bins ** ratemap_ndim
+            _acc = self.backend.allocate_ratemap(total_bins, sub_t)
+        
+        _shuf = None
+        if n_shuffle > 0 and lags is not None and _acc is not None:
+            _shuf = self.backend.allocate_shuffle_ratemap(total_bins, n_neurons, n_shuffle)
 
         for t in range(T):
             theta_history[t] = self.step(v_body_sequence[t], g)
+            if _acc is not None:
+                self.backend.record_ratemap(_acc, int(flat_indices[t]), sub_t)
+            if _shuf is not None:
+                self.backend.record_shuffle_ratemap(_shuf, flat_indices, t, lags, sub_t)
             if record and (t % self.record_stride== 0):
                 self.backend.record_state_to_buffer(_buf, t, stride=self.record_stride)
                 _bing.append(copy.deepcopy(self._bingham_state))
-            if _acc is not None:              # ADD ── one line in the hot loop
-                self.backend.record_ratemap(_acc, int(flat_indices[t]))
 
         if record:
             self.S_tot_buffer      = self.backend.buffer_to_numpy(_buf)
@@ -200,10 +216,17 @@ class PathIntegrator:
         
         if _acc is not None:
             self.ratemap_sums, self.ratemap_counts = \
-            self.backend.ratemap_to_numpy(_acc, ratemap_bins)
+                self.backend.ratemap_to_numpy(_acc, ratemap_bins, ndim=ratemap_ndim)
         else:
             self.ratemap_sums = self.ratemap_counts = None
-            return theta_history
+
+        if _shuf is not None:
+            shape = (n_shuffle,) + (ratemap_bins,) * ratemap_ndim + (-1,)
+            self.ratemap_shuf_sums = _shuf.cpu().numpy().reshape(shape)
+        else:
+            self.ratemap_shuf_sums = None
+
+        return theta_history
 
         return theta_history
 

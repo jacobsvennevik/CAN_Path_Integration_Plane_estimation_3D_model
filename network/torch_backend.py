@@ -382,25 +382,47 @@ class TorchBackend:
         """Single CPU transfer of the full buffer."""
         return buf.cpu().numpy()
 
-    def allocate_ratemap(self, bins: int) -> tuple:
+    def allocate_ratemap(self, total_bins: int, sub_t=None) -> tuple:
         """On-device accumulator for the 2-D per-neuron rate map.."""
-        N = self.S.shape[1]         
-        sums   = torch.zeros((bins * bins, N), dtype=torch.float32, device=self.device)
-        counts = torch.zeros( bins * bins,      dtype=torch.float32, device=self.device)
+        N = len(sub_t) if sub_t is not None else self.S.shape[1]
+        sums   = torch.zeros((total_bins, N), dtype=torch.float32, device=self.device)
+        counts = torch.zeros( total_bins,      dtype=torch.float32, device=self.device)
         return sums, counts
 
-    def record_ratemap(self, acc: tuple, flat_bin: int) -> None:
+    def record_ratemap(self, acc: tuple, flat_bin: int, sub_t=None) -> None:
         """Accumulate current S_tot into bins (much cheeper and quicker).
         The caller computes flat_bin so the backend stays unaware of arena geometry."""
         sums, counts = acc
-        with torch.no_grad():            # belt-and-suspenders on MPS
-            sums[flat_bin] += self.S.mean(dim=0).squeeze()
+        with torch.no_grad():
+            s = self.S.mean(dim=0).squeeze()
+            if sub_t is not None:
+                s = s[sub_t]
+            sums[flat_bin] += s
         counts[flat_bin] += 1.0
 
-    def ratemap_to_numpy(self, acc: tuple, bins: int) -> tuple:
+    def ratemap_to_numpy(self, acc: tuple, bins: int, ndim: int = 2) -> tuple:
         """Single CPU transfer from ratemap to numpy"""
         sums, counts = acc
-        return (
-            sums.cpu().numpy().reshape(bins, bins, -1),
-            counts.cpu().numpy().reshape(bins, bins),
-        )
+        shape_s = (bins,) * ndim + (-1,)
+        shape_c = (bins,) * ndim
+        return (sums.cpu().numpy().reshape(shape_s),
+                counts.cpu().numpy().reshape(shape_c))
+    
+    def allocate_shuffle_ratemap(self, total_bins: int, n_neurons: int,
+                                 n_shuffle: int):
+        """On-device (n_shuffle, total_bins, n_neurons) buffer for time-shifted
+        sums used by the spatial-info / sparsity Z-score pipeline."""
+        return torch.zeros((n_shuffle, total_bins, n_neurons),
+                           dtype=torch.float32, device=self.device)
+ 
+    def record_shuffle_ratemap(self, shuf_sums, flat_indices, t: int,
+                               lags, sub_t=None) -> None:
+        """Accumulate time-shifted activity for each shuffle."""
+        with torch.no_grad():
+            s = self.S.mean(dim=0).squeeze()
+            if sub_t is not None:
+                s = s[sub_t]
+            T = len(flat_indices)
+            for j in range(shuf_sums.shape[0]):
+                b = int(flat_indices[(t + int(lags[j])) % T])
+                shuf_sums[j, b] += s
