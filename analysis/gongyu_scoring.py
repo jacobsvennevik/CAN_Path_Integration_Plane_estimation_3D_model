@@ -287,7 +287,7 @@ def peak(corr, plane, az, al, width=3, rel_height=0.75):
     return [p0r, [p1l, p1r]]
 
 
-def gridness(ac, lb, ub):
+def gridness(ac, lb, ub, hex_only=False):
     '''
     parameters
     ----------
@@ -329,12 +329,13 @@ def gridness(ac, lb, ub):
                     pearsonr(im_flat, rotate(im, a*5, reshape=False).flatten())[0])
 
         gs[i] = gsmin - gsmax
-
+        if hex_only: #possibly only need to caluclate 1 not for i
+            break                          
     return gs[0], gs[1]
 
 
 def gridness_map(ac, az_precision=100, al_precision=50, al_max=np.pi,
-                 radial_fraction=RADIAL_FRACTION, radial_method="mean"):
+                 radial_fraction=RADIAL_FRACTION, radial_method="mean", hex_only=False):
     """Hexagonal/square gridness over a grid of (azimuth, altitude) planes.
     """
     assert ac.min() >= 0
@@ -360,7 +361,7 @@ def gridness_map(ac, az_precision=100, al_precision=50, al_max=np.pi,
                 res = peak(corr_radial, plane, az, al)[1]
                 if len(res) == 0:
                     continue
-                hgs, sgs = gridness(plane, *res)
+                hgs, sgs = gridness(plane, *res, hex_only=hex_only)
 
                 hgs_map[i, j, k] = hgs
                 sgs_map[i, j, k] = sgs

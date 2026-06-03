@@ -123,10 +123,14 @@ class BaseExperiment:
         norm_error = self._made_metric(theta_hist, torus_gt, world_pos=world_pos)
         
         active_mask = None
-        if sub_idx is not None and integrator.ratemap_sums is not None:
-            sums_flat   = integrator.ratemap_sums.reshape(-1, integrator.ratemap_sums.shape[-1])
-            span        = sums_flat.max(0) - sums_flat.min(0)
-            active_mask = span > self.ratemap_active_thresh * (span.max() + 1e-12)
+        if sub_idx is not None and integrator.ratemap_sums is not None and integrator.ratemap_counts is not None:
+            sums_flat   = integrator.ratemap_sums.reshape(-1, integrator.ratemap_sums.shape[-1])  # (total_bins, n_sub)
+            counts_flat = integrator.ratemap_counts.reshape(-1)                                    # (total_bins,)
+            valid       = counts_flat > 0                                                          # unvisited bins → nan
+            rate_flat   = np.full_like(sums_flat, np.nan)
+            rate_flat[valid] = sums_flat[valid] / counts_flat[valid, np.newaxis]
+            span        = np.nanmax(rate_flat, axis=0) - np.nanmin(rate_flat, axis=0)
+            active_mask = span > self.ratemap_active_thresh * (np.nanmax(span) + 1e-12)
 
         self.last_integrator = integrator
         #Mostly doing online now so might not need this below anymore TODO

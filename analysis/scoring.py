@@ -313,7 +313,7 @@ def global_order_1cell(ac_cell: np.ndarray, az_precision: int = 48,
     """
     hgs_map, _ = gy.gridness_map(ac_cell[..., None], az_precision=az_precision,
                                  al_precision=al_precision, al_max=np.pi / 2,
-                                 radial_method=radial_method)
+                                 radial_method=radial_method, hex_only=True)
     return float(hgs_map.max())
 
 
@@ -420,6 +420,17 @@ def _rate_map_from_accumulator(sums: np.ndarray, counts: np.ndarray,
         f[..., c] = gaussian_filter(f[..., c].astype(np.float32), sigma=sigma)
     return f
 
+def _score_one_cell(f_k, align, global_order, go_precision):
+    """Score one neuron's rate map: chi, MRA, and (if asked) global order."""
+    ac_k  = autocorrelation_1cell(f_k)
+    chi_k = chi_1cell(ac_k, align=align)
+    mra_k = mra_1cell(ac_k)
+    go_k  = np.nan
+    if global_order:
+        go_k = global_order_1cell(ac_k, az_precision=go_precision[0],
+                                  al_precision=go_precision[1])
+    return chi_k, mra_k, go_k
+
 
 def _stream_structure_scores(
     f: np.ndarray,
@@ -427,6 +438,7 @@ def _stream_structure_scores(
     align: bool = False,
     global_order: bool = False,
     go_precision: tuple = (48, 24),
+    n_jobs: int = 1,
 ) -> tuple:
     """Work out the chi / MRA / (if asked) global-order scores, one neuron at a time.
 
@@ -449,15 +461,30 @@ def _stream_structure_scores(
     mra_out = np.zeros((n, rmax))
     go_out  = np.full(n, np.nan) if global_order else None
 
-    for k in range(n):
-        ac_k = autocorrelation_1cell(f[..., k])
-        chi_out[:, k] = chi_1cell(ac_k, align=align)
-        mra_out[k]    = mra_1cell(ac_k)
-        if global_order:
-            go_out[k] = global_order_1cell(ac_k,
-                                           az_precision=go_precision[0],
-                                           al_precision=go_precision[1])
-        del ac_k                            # let it go before the next neuron
+    if n_jobs == 1:
+        # one neuron at a time, the original way
+        for k in range(n):
+            chi_k, mra_k, go_k = _score_one_cell(f[..., k], align,
+                                                 global_order, go_precision)
+            chi_out[:, k] = chi_k
+            mra_out[k]    = mra_k
+            if global_order:
+                go_out[k] = go_k
+    else:
+        # spread neurons over cores; pin each worker to one thread so
+        # scipy/BLAS don't fight over cores
+        from joblib import Parallel, delayed, parallel_backend
+        with parallel_backend("loky", inner_max_num_threads=1):
+            results = Parallel(n_jobs=n_jobs)(
+                delayed(_score_one_cell)(f[..., k].copy(), align,
+                                         global_order, go_precision)
+                for k in range(n)
+            )
+        for k, (chi_k, mra_k, go_k) in enumerate(results):
+            chi_out[:, k] = chi_k
+            mra_out[k]    = mra_k
+            if global_order:
+                go_out[k] = go_k
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)   # quiet the all-NaN slice moan
@@ -561,7 +588,7 @@ def score_run(npz_path: str, n_neuron: int = 300, seed: int = 0,
               align: bool = False, norm: str = "divmax",
               global_order: bool = False, go_precision: tuple = (48, 24),
               occ_warn: float = 0.5,
-              env_size: float | None = None) -> dict:
+              env_size: float | None = None, n_jobs: int = 1) -> dict:
     """Full 3-D scoring pipeline (the disk way, memory-safe, streams one cell at a time).
 
     Returns chi structure scores, MRA, spatial information, sparsity, and
@@ -592,8 +619,8 @@ def score_run(npz_path: str, n_neuron: int = 300, seed: int = 0,
         warnings.warn(f"n_neuron={n_neuron} > 5000: scoring will be slow.")
 
     chi_out, mra_out, go_out, ring_found, no_ring, n_failed = \
-        _stream_structure_scores(f, bins, align=align,
-                                 global_order=global_order, go_precision=go_precision)
+        _stream_structure_scores(f, bins, align=align, global_order=global_order, 
+                                 go_precision=go_precision, n_jobs=n_jobs)
 
     info = info_scores(si, p, f, bins=bins, sigma=sigma, seed=seed)
     ifd  = inter_field_distances(si)
@@ -805,6 +832,7 @@ def score_3d_from_map(
     occ_warn: float = 0.5,
     occ_error: float = 0.15,
     active_mask: np.ndarray | None = None,
+    n_jobs: int = 1, 
 ) -> dict:
     """Score a 3-D rate map we already built. No .npz file, no ScoringInput needed.
 
@@ -883,7 +911,7 @@ def score_3d_from_map(
     # the structure scores, one neuron at a time
     chi_out, mra_out, go_out, ring_found, no_ring, n_failed = \
         _stream_structure_scores(f, bins, align=align,
-                                 global_order=global_order, go_precision=go_precision)
+                                 global_order=global_order, go_precision=go_precision, n_jobs=n_jobs)
 
     out = dict(
         chi=chi_out, mra=mra_out,
@@ -910,6 +938,7 @@ def run_and_score_3d(
     sigma: float = SMOOTH_SIGMA,
     global_order: bool = False,
     n_shuffle: int = 0,
+    n_jobs: int = 1, 
 ) -> dict:
     """
     One-shot: run_3d_online then score_3d_from_map.
@@ -934,6 +963,7 @@ def run_and_score_3d(
         shuf_sums=raw["shuf_sums"],
         sigma=sigma, global_order=global_order,
         active_mask=raw["active_mask"],
+        n_jobs=n_jobs,
     )
 
     if not scores or scores.get("chi") is None:
