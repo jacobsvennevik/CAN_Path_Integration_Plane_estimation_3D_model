@@ -1,13 +1,26 @@
 """
-All of developed grid-field scoring code in one module, inheritance from G and Y in that file. 
+All of the grid-field scoring code in one module, inheritance from G and Y in that file.
+
+The disk way needs a run that was saved to a .npz file (record=True).
+
+The RAM way skips the file. We run the network and add up the activity as we go,
+
+TODO: the disk way and the and the RAM way is different as of now belive RAM is correct
+
 """
 
+import json
+import warnings
 from dataclasses import dataclass
-import numpy as np, torch
-from scipy.spatial.distance import pdist
+import numpy as np
+import torch
 from scipy.ndimage import gaussian_filter
+from scipy.spatial.distance import pdist
 
-from config import AnalysisConfig, ExperimentConfig
+from config import (
+    AnalysisConfig, ExperimentConfig,
+    world_to_normalized, world_to_flat_bins, world_to_flat_bins_3d,
+)
 from . import gongyu_scoring as gy
 
 
@@ -64,51 +77,58 @@ def _normalise_activity(S: np.ndarray, mode: str = "divmax"):
 
 def scoring_input_from_npz(npz_path: str, n_neuron: int = 20000,
                            seed: int = 0, norm: str = "divmax",
-                           active_thresh: float = 1e-3) -> ScoringInput:
-    """Runs the score tunrs a saved .npz file into something the scoring pipeline can run on. This is done by:
+                           active_thresh: float = 1e-3,
+                           env_size: float | None = None) -> "ScoringInput":
+    """Runs the score, turns a saved .npz file into something the scoring pipeline can run on. This is done by:
     1. Loading
     2. Rescaling positions
     3. Normalising activity pr neuron
-    4. Filter only active neruons and then sumbsamples then
-
-    Parameters
-    ----------
-    npz_path      : path to the saved run
-    n_neuron      : how many active neurons to keep (cap; all taken if fewer exist)
-    seed          : RNG seed for reproducible subsampling
-    norm          : 'divmax' (default, preserves zero) or 'minmax' (see
-                    `_normalise_activity`)
-    active_thresh : a neuron counts as active if (max-min) > active_thresh * max(max)
+    4. Filter only active neurons and then sumbsamples them
     """
     d         = load_npz(npz_path)
     world_pos = d[RAW_POS_KEY]     # (T, 3)
     S         = d[RAW_ACT_KEY]     # (T, N), non-negative
 
-    mn = S.min(0)    
-    mx = S.max(0)
-    
-    #1. Subsample from acitve neurons only
-    rng    = np.random.default_rng(seed)
-    active = (mx - mn) > active_thresh * mx.max()
-    active_idx = np.where(active)[0]
-    n_take = min(n_neuron, len(active_idx))
-    idx    = np.sort(rng.choice(active_idx, size=n_take, replace=False))  
-    
-    #2. Normalise activity to [0, 1] per neuron
-    S_sub = np.asarray(S[:, idx])
-    a, _, _ = _normalise_activity(S_sub, mode=norm)
-    #2. Rescale positions to within [-1, 1]^3, preserving geometry
-    lo, hi = world_pos.min(0), world_pos.max(0)
-    center = (hi + lo) / 2.0
-    half   = np.max((hi - lo) / 2.0)
-    half   = half if half > 0 else 1.0
-    x = (world_pos - center) / half
+    # work out env_size if we were not given one
+    if env_size is None:
+        cfg_path = npz_path.replace(".npz", "_config.json")
+        try:
+            with open(cfg_path) as fh:
+                env_size = json.load(fh)["params"]["experiment"]["env_size"]
+        except (FileNotFoundError, KeyError, TypeError):
+            warnings.warn(
+                f"scoring_input_from_npz: env_size not found in {cfg_path}; ",
+                UserWarning, stacklevel=2,
+            )
 
+    if env_size is not None:
+        # rescale positions to [-1, 1]^3 using the real box, keeps geometry correct
+        x = world_to_normalized(world_pos, env_size)
+    else:
+        # fallback: just use the smallest box that holds the path (old way, not great)
+        lo, hi = world_pos.min(0), world_pos.max(0)
+        center = (hi + lo) / 2.0
+        half   = np.max((hi - lo) / 2.0)
+        x      = (world_pos - center) / half
+
+    # subsample from active neurons only
+    mn = S.min(0)
+    mx = S.max(0)
+    rng       = np.random.default_rng(seed)
+    active    = (mx - mn) > active_thresh * mx.max()
+    active_idx = np.where(active)[0]
+    n_take    = min(n_neuron, len(active_idx))
+    idx       = np.sort(rng.choice(active_idx, size=n_take, replace=False))
+
+    # normalise activity to [0, 1] per neuron
+    S_sub    = np.asarray(S[:, idx])
+    a, _, _  = _normalise_activity(S_sub, mode=norm)
 
     return ScoringInput(
         x=x, a=a, cell_idx=idx,
         meta=dict(npz_path=npz_path, n_neuron=int(n_take), seed=int(seed),
-                  norm=norm, n_active=int(active.sum()), n_total=int(S.shape[1])),
+                  norm=norm, n_active=int(active.sum()), n_total=int(S.shape[1]),
+                  env_size=env_size),
     )
 
 
@@ -180,7 +200,7 @@ def autocorr2d(f: np.ndarray, th: float = AUTOCORR_TH) -> np.ndarray:
         f = f[..., None]
     n   = f.shape[0] * f.shape[1]
     std = f.std(axis=(0, 1))
-    std = np.where(std < 1e-10, 1.0, std)   # guard: zero-std → skip normalisation
+    std = np.where(std < 1e-10, 1.0, std)   # guard: zero-std, skip normalisation
     f_  = (f - f.mean(axis=(0, 1))) / std
     out = []
     for i in range(f.shape[-1]):
@@ -236,10 +256,6 @@ def autocorrelation_1cell(f_cell: np.ndarray, th: float = AUTOCORR_TH) -> np.nda
     ac[ac < th] = 0.0
     return ac
 
-
-# =============================================================================
-# 4. STRUCTURE  (chi + MRA)
-# =============================================================================
 
 def chi_1cell(ac_cell: np.ndarray, align: bool = False) -> np.ndarray:
     """(3,) chi scores (fcc, hcp, col) for one cell's 3-D autocorrelogram.
@@ -388,6 +404,120 @@ def inter_field_distances(si: ScoringInput, activity_pct: float = 90.0,
     return out
 
 
+def _rate_map_from_accumulator(sums: np.ndarray, counts: np.ndarray,
+                               sigma: float = SMOOTH_SIGMA) -> np.ndarray:
+    """Smoothed mean-activity rate map from online accumulators.
+
+    Works for any spatial dimensionality:
+        2-D input : sums (b, b, n),   counts (b, b)
+        3-D input : sums (b, b, b, n), counts (b, b, b)
+
+    Returns f of the same shape as sums.
+    """
+    denom = np.where(counts > 0, counts, 1.0)[..., None]
+    f = sums / denom
+    for c in range(f.shape[-1]):
+        f[..., c] = gaussian_filter(f[..., c].astype(np.float32), sigma=sigma)
+    return f
+
+
+def _stream_structure_scores(
+    f: np.ndarray,
+    bins: int,
+    align: bool = False,
+    global_order: bool = False,
+    go_precision: tuple = (48, 24),
+) -> tuple:
+    """Work out the chi / MRA / (if asked) global-order scores, one neuron at a time.
+
+    Both score_run (the disk way) and score_3d_from_map (the RAM way) lean on this.
+    We only ever keep one neuron's big autocorrelation cube in memory at once, so
+    this stays light even with lots of neurons.
+
+    Returns
+    -------
+    chi_out    (3, n)   the fcc / hcp / col structure scores
+    mra_out    (n, rmax)
+    go_out     (n,) or None
+    ring_found (n,) bool
+    no_ring    (n,) bool
+    n_failed   int
+    """
+    n    = f.shape[-1]
+    rmax = (2 * bins - 1) // 2
+    chi_out = np.full((3, n), np.nan)
+    mra_out = np.zeros((n, rmax))
+    go_out  = np.full(n, np.nan) if global_order else None
+
+    for k in range(n):
+        ac_k = autocorrelation_1cell(f[..., k])
+        chi_out[:, k] = chi_1cell(ac_k, align=align)
+        mra_out[k]    = mra_1cell(ac_k)
+        if global_order:
+            go_out[k] = global_order_1cell(ac_k,
+                                           az_precision=go_precision[0],
+                                           al_precision=go_precision[1])
+        del ac_k                            # let it go before the next neuron
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)   # quiet the all-NaN slice moan
+        chi_max = np.nanmax(chi_out, axis=0)
+
+    # tell apart "we looked and there was no ring" (chi pinned to 0) from a real
+    # measured-low score, and from an outright fail (NaN). chi sitting at 0 is NOT the
+    # same evidence as a low number we actually measured.
+    ring_found = np.isfinite(chi_max) & (np.abs(chi_max) > 1e-9)
+    no_ring    = np.isfinite(chi_max) & (np.abs(chi_max) <= 1e-9)
+    return chi_out, mra_out, go_out, ring_found, no_ring, int(np.isnan(chi_max).sum())
+
+
+def _online_shuffle_zscores(
+    shuf_sums: np.ndarray,
+    scored_idx: np.ndarray,
+    denom: np.ndarray,
+    p: np.ndarray,
+    sigma: float,
+    sinfo: np.ndarray,
+    sidx: np.ndarray,
+) -> tuple:
+    """Work out sinfo_z / sidx_z using the slide-in-time shuffle (RAM way only).
+
+    This is a different test from the one in info_scores (which shuffles fully at
+    random). Sliding each neuron forward in time keeps the neuron's own slow wiggle,
+    which makes it a tougher test for CAN activity. So do not put these Z-scores
+    head to head with the full-shuffle ones from the disk way.
+
+    Parameters
+    ----------
+    shuf_sums  : (n_shuffle, *spatial, n_sub)  the shuffle maps we built earlier
+    scored_idx : which neuron columns to score
+    denom      : safe visit-count divider, shape (*spatial, 1)
+    p          : fraction of time spent in each bin, shape (*spatial,)
+    sigma      : how much to smooth, in bins
+    sinfo, sidx: the real (un-shuffled) values, each (n_scored,)
+
+    Returns
+    -------
+    (sinfo_z, sidx_z)  both (n_scored,) float64
+        Rule of thumb: Z of 2.58 or more means 99% sure (Gong and Yu, Figure 4).
+    """
+    n_shuffle = shuf_sums.shape[0]
+    n_scored  = len(scored_idx)
+    sinfo_shuf = np.zeros((n_shuffle, n_scored), dtype=np.float32)
+    sidx_shuf  = np.zeros((n_shuffle, n_scored), dtype=np.float32)
+
+    for j in range(n_shuffle):
+        f_j = shuf_sums[j][..., scored_idx] / denom
+        for c in range(n_scored):
+            f_j[..., c] = gaussian_filter(f_j[..., c].astype(np.float32), sigma=sigma)
+        sinfo_shuf[j] = _spatial_info(p, f_j).astype(np.float32)
+        sidx_shuf[j]  = _sparsity_idx(p, f_j).astype(np.float32)
+        del f_j
+
+    sinfo_z = (sinfo - sinfo_shuf.mean(0)) / (sinfo_shuf.std(0) + 1e-9)
+    sidx_z  = (sidx  - sidx_shuf.mean(0))  / (sidx_shuf.std(0)  + 1e-9)
+    return sinfo_z.astype(np.float64), sidx_z.astype(np.float64)
+
 
 def score_2d(npz_path: str, n_neuron: int = 5000, seed: int = 0,
              bins: int = BINS, sigma: float = SMOOTH_SIGMA,
@@ -430,56 +560,40 @@ def score_run(npz_path: str, n_neuron: int = 300, seed: int = 0,
               bins: int = BINS, sigma: float = SMOOTH_SIGMA,
               align: bool = False, norm: str = "divmax",
               global_order: bool = False, go_precision: tuple = (48, 24),
-              occ_warn: float = 0.5) -> dict:
-    """Full 3-D scoring pipeline (memory-safe, streams one cell at a time).
+              occ_warn: float = 0.5,
+              env_size: float | None = None) -> dict:
+    """Full 3-D scoring pipeline (the disk way, memory-safe, streams one cell at a time).
 
     Returns chi structure scores, MRA, spatial information, sparsity, and
     inter-field distances per neuron.
+
+    env_size : how big the real box is, in metres; just passed along to
+               scoring_input_from_npz. Leave as None to read it from the
+               _config.json file next to the run (the recommended way).
     """
-    si  = scoring_input_from_npz(npz_path, n_neuron=n_neuron, seed=seed, norm=norm)
-    f   = activity_rate_map(si, dims=(0, 1, 2), bins=bins, sigma=sigma)  # (b,b,b,n)
-    p   = occupancy(si, dims=(0, 1, 2), bins=bins)                       # (b,b,b)
+    si  = scoring_input_from_npz(npz_path, n_neuron=n_neuron, seed=seed,
+                                 norm=norm, env_size=env_size)
+    f   = activity_rate_map(si, dims=(0, 1, 2), bins=bins, sigma=sigma)
+    p   = occupancy(si, dims=(0, 1, 2), bins=bins)
     occ = float((p > 0).mean())
 
     if occ < occ_warn:
-        import warnings
         warnings.warn(
             f"occupancy {occ:.1%}: map is sparse — chi/MRA reflect coverage "
             "more than tuning. Lengthen the trajectory."
         )
     if align:
-        import warnings
         warnings.warn(
             "align=True is miscalibrated against chi_score's fixed template and "
             "can collapse a cleanly-ordered cell to ~0 (see chi_1cell). Prefer "
             "align=False + global_order=True for an orientation-invariant readout."
         )
     if n_neuron > 5000:
-        import warnings
-        warnings.warn(
-            f"n_neuron > 5000: scoring this many cells will be slow."
-        )
+        warnings.warn(f"n_neuron={n_neuron} > 5000: scoring will be slow.")
 
-    # --- structure scores: stream one cell at a time, never hold the full cube
-    rmax = (2 * bins - 1) // 2
-    chi_out = np.full((3, si.n), np.nan)
-    mra_out = np.zeros((si.n, rmax))
-    go_out  = np.full(si.n, np.nan) if global_order else None
-    for k in range(si.n):
-        ac_k = autocorrelation_1cell(f[..., k])     # (2b-1, 2b-1, 2b-1)
-        chi_out[:, k] = chi_1cell(ac_k, align=align)
-        mra_out[k]    = mra_1cell(ac_k)
-        if global_order:
-            go_out[k] = global_order_1cell(ac_k, az_precision=go_precision[0],
-                                           al_precision=go_precision[1])
-        del ac_k                                     # free before next cell
-
-    # distinguish "no ring detected" (chi forced to exactly 0) from a measured-low
-    # gridness and from an outright failure (NaN). chi-at-0 is NOT the same evidence
-    # as a measured-low score — see the H1 caveat in the review.
-    chi_max  = np.nanmax(chi_out, axis=0)
-    ring_found = np.isfinite(chi_max) & (np.abs(chi_max) > 1e-9)
-    no_ring  = np.isfinite(chi_max) & (np.abs(chi_max) <= 1e-9)
+    chi_out, mra_out, go_out, ring_found, no_ring, n_failed = \
+        _stream_structure_scores(f, bins, align=align,
+                                 global_order=global_order, go_precision=go_precision)
 
     info = info_scores(si, p, f, bins=bins, sigma=sigma, seed=seed)
     ifd  = inter_field_distances(si)
@@ -488,9 +602,9 @@ def score_run(npz_path: str, n_neuron: int = 300, seed: int = 0,
         idx        = si.cell_idx,
         chi        = chi_out,
         mra        = mra_out,
-        ring_found = ring_found,                 # True = a ring was detected
-        no_ring    = no_ring,                    # True = chi==0 because no ring (not "measured low")
-        n_failed   = int(np.isnan(chi_max).sum()),
+        ring_found = ring_found,
+        no_ring    = no_ring,
+        n_failed   = n_failed,
         **info,
         ifd        = ifd,
         peak       = f.max(axis=(0, 1, 2)),
@@ -498,75 +612,419 @@ def score_run(npz_path: str, n_neuron: int = 300, seed: int = 0,
         aligned    = align,
     )
     if global_order:
-        out["go"] = go_out                       # orientation-invariant order score
+        out["go"] = go_out
     return out
 
-def run_with_online_ratemap(exp, g, bins=40, n_warmup=100, mode="integrate"):
-    """
-    Mmeory light run, so that the hughe buffers is not used and stride might not be needed.
-    """
-    integ, bk, cfg = exp.integrator, exp.integrator.backend, exp.config.experiment
-    dev, half = bk.device, cfg.env_size / 2.0
+def run_with_online_ratemap(exp, g, bins: int = 40, n_warmup: int = 100,
+                            mode: str = "integrate",
+                            trajectory=None) -> dict:
+    """Memory light 2-D run (just the XY floor).
 
-    world_pos, v_body_seq, torus_gt = exp.generate_trajectory() 
+    We add the activity up into a (bins², N) map on the device as we go, so the huge
+    per-step buffer is never needed. One trip back to the CPU at the very end. If you
+    want the full 3-D version use run_3d_online instead.
+
+    Parameters
+    ----------
+    exp        : a BaseExperiment subclass
+    g          : gravity vector
+    trajectory : optional (world_pos, v_body_seq, torus_gt) tuple.
+                 Hand this in to reuse a path you already have from
+                 run_experiment(), so we do not run the network a second time
+                 just to get the same path back.
+    """
+    from path_integration import PathIntegrator
+
+    cfg   = exp.config.experiment
+    # build the integrator from the stored kwargs. Do NOT reach for exp.integrator,
+    # it is not a thing on BaseExperiment.
+    integ = PathIntegrator(qan=exp.qan, **exp.integrator_kwargs)
+    bk    = integ.backend
+    dev   = getattr(bk, "device", torch.device("cpu"))
+
+    if trajectory is not None:
+        world_pos, v_body_seq, torus_gt = trajectory
+    else:
+        world_pos, v_body_seq, torus_gt = exp.generate_trajectory()
+
     T, N = world_pos.shape[0], bk.S.shape[1]
-
-    integ.reset(torus_gt[0])                       # bump at start + fresh filter + clear history
+    integ.reset(torus_gt[0])
     if mode == "integrate" and n_warmup:
         integ.warmup(n_warmup)
 
-    # flat spatial-bin index for every step
-    xy   = world_pos[:, :2] / half                 # -> ~[-1, 1]
-    ij   = np.clip(np.floor((xy + 1.0) * 0.5 * bins).astype(np.int64), 0, bins - 1)
-    flat = (ij[:, 0] * bins + ij[:, 1]).tolist()
+    # arena-anchored 2-D bin number for each step (XY only)
+    flat_2d = world_to_flat_bins(world_pos, cfg.env_size, bins)     # (T,) int64
 
-    sums   = torch.zeros((bins * bins, N), dtype=torch.float32, device=dev)   # the accumulator
+    sums   = torch.zeros((bins * bins, N), dtype=torch.float32, device=dev)
     counts = torch.zeros(bins * bins,      dtype=torch.float32, device=dev)
 
     theta_hist = np.zeros((T, 3), dtype=np.float32)
     for t in range(T):
         if mode == "integrate":
-            theta_hist[t] = integ.step(v_body_seq[t], g)     # filter + drive + decode (real path)
-        else:                                                # oracle
-            bk.reset(torus_gt[t]); theta_hist[t] = torus_gt[t]
-        s = bk.S.mean(dim=0).squeeze()                       # (N,) on device — no per-step CPU copy
-        b = flat[t]
-        sums[b] += s
+            theta_hist[t] = integ.step(v_body_seq[t], g)
+        else:
+            bk.reset(torus_gt[t])
+            theta_hist[t] = torus_gt[t]
+        s = bk.S.mean(dim=0).squeeze()          # (N,) on device, no per-step CPU copy
+        b = int(flat_2d[t])
+        sums[b]   += s
         counts[b] += 1.0
 
-    return dict(                                             # one CPU transfer, at the end
-        sums   = sums.cpu().numpy().reshape(bins, bins, N),
-        counts = counts.cpu().numpy().reshape(bins, bins),
+    return dict(
+        sums=sums.cpu().numpy().reshape(bins, bins, N),
+        counts=counts.cpu().numpy().reshape(bins, bins),
         bins=bins, world_pos=world_pos, torus_gt=torus_gt, theta_hist=theta_hist,
     )
 
+def run_3d_online(
+    exp,
+    g_vec: np.ndarray,
+    *,
+    trajectory=None,
+    bins: int = 25,
+    n_sub: int = 300,
+    seed: int = 0,
+    n_warmup: int = 100,
+    active_thresh: float = 1e-3,
+    n_shuffle: int = 0,
+    shuffle_min_lag_frac: float = 0.1,
+) -> dict:
+    """RAM-only 3-D run. Never makes the big S_tot_buffer.
 
-def score_2d_from_map(sums, counts, sigma=1.75, n_neuron=5000, seed=0, active_thresh=1e-3):
-    """Score an accumulated rate map. Same autocorr + gridness as score_2d, no .npz needed."""
-    from analysis.scoring import autocorr2d, hex_gridness_2d
-    N = sums.shape[-1]
+    We step the network one timestep at a time and add the activity into a
+    (bins³, n_sub) tensor on the device. One trip back to the CPU at the end. If you
+    ask for shuffle maps too, score_3d_from_map can then work out sinfo_z / sidx_z
+    without ever needing the full per-step activity buffer.
 
-    # drop dead/flat neurons from the summed map, then subsample (mirrors score_2d)
-    flat = sums.reshape(-1, N)
-    span = flat.max(0) - flat.min(0)
-    active_idx = np.where(span > active_thresh * (span.max() + 1e-12))[0]
-    take = min(n_neuron, len(active_idx))
-    idx  = np.sort(np.random.default_rng(seed).choice(active_idx, size=take, replace=False)) \
-           if take else np.array([], int)
+    """
+    from path_integration import PathIntegrator
 
-    denom = np.where(counts > 0, counts, 1.0)[..., None]
-    f = sums[..., idx] / denom                               # (bins, bins, take) — small after subsample
-    for c in range(f.shape[-1]):
-        f[..., c] = gaussian_filter(f[..., c], sigma=sigma)
+    g_vec = np.asarray(g_vec, dtype=float)
+    cfg   = exp.config.experiment
 
-    ac  = autocorr2d(f)                                      # gridness is scale-invariant (it z-scores),
-    hgs = np.full(f.shape[-1], np.nan)                       # so no per-neuron divmax needed here
-    sgs = np.full(f.shape[-1], np.nan)
-    for k in range(f.shape[-1]):
-        hgs[k], sgs[k] = hex_gridness_2d(ac[..., k])
+    # get the path: reuse one if handed in, otherwise make a fresh one
+    if trajectory is not None:
+        world_pos, v_body_seq, torus_gt = trajectory
+    else:
+        world_pos, v_body_seq, torus_gt = exp.generate_trajectory()
+    T = world_pos.shape[0]
 
-    grid_like = np.isfinite(hgs) & (hgs > 0.3) & (sgs < hgs)
-    return dict(f=f, ac=ac, hgs=hgs, sgs=sgs, idx=idx,
-                ring_frac=float(np.isfinite(hgs).mean()) if len(hgs) else 0.0,
-                grid_like=grid_like, occupancy=float((counts > 0).mean()),
-                n_active=int(len(active_idx)))
+    # the thing that steps the network
+    integ = PathIntegrator(qan=exp.qan, **exp.integrator_kwargs)
+    bk    = integ.backend
+    dev   = getattr(bk, "device", torch.device("cpu"))
+
+    # pick which neurons to follow up front, keeps the accumulator small
+    N        = bk.S.shape[1]
+    rng      = np.random.default_rng(seed)
+    sub_idx  = np.sort(rng.choice(N, size=min(n_sub, N), replace=False))
+    sub_t    = torch.tensor(sub_idx, dtype=torch.long, device=dev)
+    n_sub_actual = len(sub_idx)
+
+    # the running totals, kept on the device
+    sums_d   = torch.zeros((bins ** 3, n_sub_actual), dtype=torch.float32, device=dev)
+    counts_d = torch.zeros(bins ** 3,                 dtype=torch.float32, device=dev)
+
+    # extra totals for the shuffle, only if asked for
+    shuf_sums_d = None
+    lags        = None
+    if n_shuffle > 0:
+        min_lag = max(1, int(T * shuffle_min_lag_frac))
+        if min_lag >= T:
+            warnings.warn(
+                f"run_3d_online: T={T} too short for n_shuffle={n_shuffle} "
+                f"(min_lag={min_lag} ≥ T). Disabling shuffle.",
+                UserWarning, stacklevel=2,
+            )
+            n_shuffle = 0
+        else:
+            lags        = rng.integers(min_lag, T, size=n_shuffle)
+            shuf_sums_d = torch.zeros(
+                (n_shuffle, bins ** 3, n_sub_actual),
+                dtype=torch.float32, device=dev,
+            )
+
+    # work out which 3-D box each step lands in, all at once
+    flat3d = world_to_flat_bins_3d(world_pos, cfg.env_size, bins)   # (T,) int64
+
+    # put the bump at the start and let things settle
+    integ.reset(torus_gt[0])
+    integ.warmup(n_warmup)
+
+    # the main loop: step, then drop the activity into its box
+    theta_hist = np.zeros((T, 3), dtype=np.float32)
+    for t in range(T):
+        theta_hist[t] = integ.step(v_body_seq[t], g_vec)
+
+        s = bk.S.mean(dim=0).squeeze()     # (N,) on device
+        b = int(flat3d[t])
+        sums_d[b]   += s[sub_t]
+        counts_d[b] += 1.0
+
+        if shuf_sums_d is not None:
+            for j in range(n_shuffle):
+                b_shuf = int(flat3d[(t + lags[j]) % T])
+                shuf_sums_d[j, b_shuf] += s[sub_t]
+
+    # one trip back to the CPU
+    sums   = sums_d.cpu().numpy().reshape(bins, bins, bins, n_sub_actual)
+    counts = counts_d.cpu().numpy().reshape(bins, bins, bins)
+
+    shuf_sums = None
+    if shuf_sums_d is not None:
+        shuf_sums = shuf_sums_d.cpu().numpy().reshape(
+            n_shuffle, bins, bins, bins, n_sub_actual
+        )
+
+    # mark the neurons that actually did something, and grab the filter's history
+    span        = sums.reshape(-1, n_sub_actual).max(0) - sums.reshape(-1, n_sub_actual).min(0)
+    active_mask = span > active_thresh * (span.max() + 1e-12)
+
+    n_hat_hist = np.array(integ.history["n_hat"])
+    gap_hist   = np.array(integ.history["z2"]) - np.array(integ.history["z1"])
+
+    return dict(
+        sums=sums, counts=counts,
+        sub_idx=sub_idx, active_mask=active_mask,
+        world_pos=world_pos, torus_gt=torus_gt,
+        theta_hist=theta_hist, bins=bins,
+        n_hat_hist=n_hat_hist, gap_hist=gap_hist,
+        shuf_sums=shuf_sums, n_shuffle=n_shuffle,
+    )
+
+
+def score_3d_from_map(
+    sums: np.ndarray,
+    counts: np.ndarray,
+    *,
+    shuf_sums: np.ndarray | None = None,
+    sigma: float = SMOOTH_SIGMA,
+    align: bool = False,
+    global_order: bool = False,
+    go_precision: tuple = (48, 24),
+    occ_warn: float = 0.5,
+    occ_error: float = 0.15,
+    active_mask: np.ndarray | None = None,
+) -> dict:
+    """Score a 3-D rate map we already built. No .npz file, no ScoringInput needed.
+
+    Note (Gong and Yu, Figure 4): Z of 2.58 or more.
+    """
+    bins    = sums.shape[0]
+    n_total = sums.shape[-1]
+
+    # which neurons are we scoring
+    scored_idx = np.where(active_mask)[0] if active_mask is not None \
+                 else np.arange(n_total)
+
+    if len(scored_idx) == 0:
+        warnings.warn("score_3d_from_map: no active neurons to score.", UserWarning, stacklevel=2)
+        return dict(chi=None, mra=None, ring_found=None, no_ring=None, n_failed=0,
+                    sinfo=None, sidx=None, sinfo_z=None, sidx_z=None, ifd=None,
+                    peak=None, occupancy=0.0, reliable=False,
+                    scored_idx=scored_idx, bins=bins, aligned=align)
+
+    # turn the totals into a smoothed rate map
+    sums_sub = sums[..., scored_idx].copy()
+    denom    = np.where(counts > 0, counts, 1.0)[..., None]
+    f        = _rate_map_from_accumulator(sums_sub, counts, sigma=sigma)
+
+    # how much of the box did we actually cover, and can we trust it
+    p   = counts / (counts.sum() + 1e-30)
+    occ = float((p > 0).mean())
+
+    reliable = True
+    if occ < occ_error:
+        warnings.warn(
+            f"score_3d_from_map: occupancy {occ:.1%} < {occ_error:.0%}. "
+            f"Structural scores are NaN-filled (reliable=False). "
+            f"Minimum T for occ ≥ {occ_error:.0%} at bins={bins}: "
+            f"≳ {int(occ_error * bins**3)} steps.  "
+            f"Try bins=12 for short exploratory runs.",
+            UserWarning, stacklevel=2,
+        )
+        reliable = False
+        n_scored = len(scored_idx)
+        rmax     = (2 * bins - 1) // 2
+        sinfo    = _spatial_info(p, f)
+        sidx     = _sparsity_idx(p, f)
+        sinfo_z, sidx_z = None, None
+        if shuf_sums is not None:
+            sinfo_z, sidx_z = _online_shuffle_zscores(
+                shuf_sums, scored_idx, denom, p, sigma, sinfo, sidx)
+        out = dict(
+            chi=np.full((3, n_scored), np.nan),
+            mra=np.full((n_scored, rmax), np.nan),
+            ring_found=np.zeros(n_scored, bool), no_ring=np.zeros(n_scored, bool),
+            n_failed=n_scored,
+            sinfo=sinfo, sidx=sidx, sinfo_z=sinfo_z, sidx_z=sidx_z, ifd=None,
+            peak=f.max(axis=(0, 1, 2)), occupancy=occ, reliable=False,
+            scored_idx=scored_idx, bins=bins, aligned=align,
+        )
+        return out
+
+    elif occ < occ_warn:
+        warnings.warn(
+            f"score_3d_from_map: occupancy {occ:.1%} — map is sparse. "
+            f"chi/MRA may reflect coverage more than tuning. "
+            f"T ≳ {int(2 * bins**3)} steps needed for occ > {occ_warn:.0%}.",
+            UserWarning, stacklevel=2,
+        )
+
+    # the spatial info numbers
+    sinfo = _spatial_info(p, f)
+    sidx  = _sparsity_idx(p, f)
+
+    sinfo_z, sidx_z = None, None
+    if shuf_sums is not None:
+        sinfo_z, sidx_z = _online_shuffle_zscores(
+            shuf_sums, scored_idx, denom, p, sigma, sinfo, sidx)
+
+    # the structure scores, one neuron at a time
+    chi_out, mra_out, go_out, ring_found, no_ring, n_failed = \
+        _stream_structure_scores(f, bins, align=align,
+                                 global_order=global_order, go_precision=go_precision)
+
+    out = dict(
+        chi=chi_out, mra=mra_out,
+        ring_found=ring_found, no_ring=no_ring, n_failed=n_failed,
+        sinfo=sinfo, sidx=sidx,
+        sinfo_z=sinfo_z, sidx_z=sidx_z,     # explicit None when no shuf_sums
+        ifd=None,                             # unavailable on online path
+        peak=f.max(axis=(0, 1, 2)),
+        occupancy=occ, reliable=reliable,
+        scored_idx=scored_idx, bins=bins, aligned=align,
+    )
+    if global_order:
+        out["go"] = go_out
+    return out
+
+def run_and_score_3d(
+    exp,
+    g_vec: np.ndarray,
+    *,
+    bins: int = 25,
+    n_sub: int = 300,
+    seed: int = 0,
+    n_warmup: int = 100,
+    sigma: float = SMOOTH_SIGMA,
+    global_order: bool = False,
+    n_shuffle: int = 0,
+) -> dict:
+    """
+    One-shot: run_3d_online then score_3d_from_map.
+
+    Returns a merged dict with all keys from both functions, plus:
+        grid_like  (n_scored,) bool
+        grid_like_method  str  — which metric built grid_like
+
+    grid_like is built from global_order scores ('go') when global_order=True,
+    which is the orientation-invariant readout matching Gong & Yu §2.6.3.
+    When global_order=False, grid_like falls back to the chi-based triage verdict,
+    which is FRAME-DEPENDENT (calibrated to the 8° prototype orientation).
+    For any result you intend to publish, use global_order=True and validate
+    against prototypes.reference_scores() at your run's bins.
+    """
+    raw    = run_3d_online(
+        exp, g_vec, bins=bins, n_sub=n_sub, seed=seed,
+        n_warmup=n_warmup, n_shuffle=n_shuffle,
+    )
+    scores = score_3d_from_map(
+        raw["sums"], raw["counts"],
+        shuf_sums=raw["shuf_sums"],
+        sigma=sigma, global_order=global_order,
+        active_mask=raw["active_mask"],
+    )
+
+    if not scores or scores.get("chi") is None:
+        return {**raw, **scores, "grid_like": np.zeros(0, bool),
+                "grid_like_method": "none (no scored cells)"}
+
+    # Build grid_like from the most reliable available metric
+    if global_order and scores.get("go") is not None:
+        go = scores["go"]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            grid_like = np.isfinite(go) & (go > 0)
+        grid_like_method = "global_order (orientation-invariant)"
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            chi_max = np.nanmax(scores["chi"], axis=0)
+        grid_like = scores.get("ring_found", np.zeros(0, bool)) & (chi_max > 0)
+        grid_like_method = (
+            "chi_triage (FRAME-DEPENDENT: calibrated to 8° prototype orientation). "
+            "Call with global_order=True for the orientation-invariant verdict."
+        )
+        n_pos = grid_like.sum()
+        print(
+            f"[run_and_score_3d] grid_like ({n_pos} / {len(grid_like)} cells) is "
+            f"chi-based triage.  Pass global_order=True to score those {n_pos} "
+            f"positives with the orientation-invariant readout."
+        )
+
+    return {**raw, **scores, "grid_like": grid_like,
+            "grid_like_method": grid_like_method}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 4.  FIXED run_with_online_ratemap  (replaces broken version in scoring.py)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_with_online_ratemap(
+    exp,
+    g,
+    bins: int = 40,
+    n_warmup: int = 100,
+    mode: str = "integrate",
+) -> dict:
+    """
+    2-D (XY projection) memory-light run.
+
+    Fixed version of the broken function in scoring.py:
+      • Creates its own PathIntegrator (exp.integrator does not exist on
+        BaseExperiment).
+      • Routes 2-D binning through world_to_flat_bins (arena-anchored, same
+        convention as run_3d_online).
+
+    For 3-D structure scoring use run_3d_online + score_3d_from_map instead.
+    This function is only useful as a fast 2-D hexagonality sanity check.
+    """
+    cfg   = exp.config.experiment
+
+    # DO NOT access exp.integrator — create a new instance from integrator_kwargs.
+    integ = PathIntegrator(qan=exp.qan, **exp.integrator_kwargs)
+    bk    = integ.backend
+    dev   = getattr(bk, "device", torch.device("cpu"))
+
+    world_pos, v_body_seq, torus_gt = exp.generate_trajectory()
+    T, N = world_pos.shape[0], bk.S.shape[1]
+
+    integ.reset(torus_gt[0])
+    if mode == "integrate" and n_warmup:
+        integ.warmup(n_warmup)
+
+    # 2-D flat bin indices routed through config.world_to_flat_bins
+    # (arena-anchored, clips position before binning — same convention as 3-D path)
+    flat_2d = world_to_flat_bins(world_pos, cfg.env_size, bins)    # (T,) int64
+
+    sums   = torch.zeros((bins * bins, N), dtype=torch.float32, device=dev)
+    counts = torch.zeros(bins * bins,      dtype=torch.float32, device=dev)
+
+    theta_hist = np.zeros((T, 3), dtype=np.float32)
+    for t in range(T):
+        if mode == "integrate":
+            theta_hist[t] = integ.step(v_body_seq[t], g)
+        else:
+            bk.reset(torus_gt[t])
+            theta_hist[t] = torus_gt[t]
+        s = bk.S.mean(dim=0).squeeze()
+        b = int(flat_2d[t])
+        sums[b]   += s
+        counts[b] += 1.0
+
+    return dict(
+        sums=sums.cpu().numpy().reshape(bins, bins, N),
+        counts=counts.cpu().numpy().reshape(bins, bins),
+        bins=bins, world_pos=world_pos, torus_gt=torus_gt, theta_hist=theta_hist,
+    )

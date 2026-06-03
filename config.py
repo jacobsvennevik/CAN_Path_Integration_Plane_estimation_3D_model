@@ -52,8 +52,21 @@ class RunConfig:
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
     # no spacing/grid_spacing assert: different unit systems, no reason to match
     
-def world_to_flat_bins(world_pos, env_size, bins):
+def world_to_normalized(world_pos, env_size):
+    """Map physical position (metres, within ±env_size/2) to the [-1,1] cube
+    that every scorer assumes. Arena-anchored: the ruler is the wall, not the
+    trajectory, so grid SPACING stays physically meaningful across runs."""
     half = env_size / 2.0
-    xy = world_pos[:, :2] / half
-    ij = np.clip(np.floor((xy + 1.0) * 0.5 * bins).astype(np.int64), 0, bins - 1)
+    return np.clip(world_pos / half, -1.0, 1.0)
+
+def world_to_flat_bins_3d(world_pos, env_size, bins):
+    xyz = world_to_normalized(world_pos, env_size)         
+    ijk = np.clip(np.floor((xyz + 1.0) * 0.5 * bins).astype(np.int64), 0, bins - 1)
+    return (ijk[:, 0] * bins + ijk[:, 1]) * bins + ijk[:, 2]
+    
+def world_to_flat_bins(world_pos, env_size, bins):
+    xy  = world_to_normalized(world_pos[:, :2], env_size)  # shared normalize; index-clip below handles bounds
+    ij  = np.clip(np.floor((xy + 1.0) * 0.5 * bins).astype(np.int64), 0, bins - 1)
     return ij[:, 0] * bins + ij[:, 1]
+
+
