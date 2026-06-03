@@ -21,7 +21,7 @@ PROTO_ROTZ    = 8 * np.pi / 180     # CALIBRATED frame; chi_score's plane indice
 PROTO_SCALE   = 0.1                 # per-point Gaussian jitter when building the density
 PROTO_N_JIT   = 500                 # jitter replicates per lattice point
 PROTO_N_RND   = 100                 # points in the random (RND) baseline cloud
-PROTO_BINS = AnalysisConfig.ratemap_bins
+PROTO_BINS = AnalysisConfig.bins
 PROTO_TH   = AnalysisConfig.autocorr_th
 
 
