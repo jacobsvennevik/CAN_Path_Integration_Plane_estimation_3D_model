@@ -51,11 +51,14 @@ class BaseExperiment:
             offset_magnitude=net.offset_magnitude,
             build_connectivity=net.build_connectivity,
         )
+        N_neurons    = self.qan.cans[0].S.shape[0]
+        decode_chunk = max(64, int(256e6 / (4 * N_neurons)))
         self.integrator_kwargs = dict(
             kappa=config.experiment.kappa,
             alpha=config.experiment.bingham_decay,   # Bingham decay, not the network's alpha
             scale=config.experiment.scale,
             plane_mode=plane_mode,                   # "bayesian" (default) or "true"
+            decode_chunk=decode_chunk,
         )
         self.config        = config
         self.record        = record
