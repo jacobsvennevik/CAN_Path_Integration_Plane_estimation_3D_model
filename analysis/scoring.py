@@ -1036,6 +1036,9 @@ def score_2d_from_map(
     grid_like  = ring_found & (hgs > 0.3)
 
     return dict(
+        f          = f,      #  smoothed rate maps
+        ac         = ac,     #  autocorrelograms 
+        p          = p,      # occupancy
         hgs        = hgs,
         sgs        = sgs,
         grid_like  = grid_like,
