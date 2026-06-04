@@ -48,14 +48,11 @@ class Arena2DExperiment(BaseExperiment):
             world_pos[t] = new_pos
             v_body_seq[t] = v
 
-        
+        #TODO: move block into base same as 3D
         metric = self.qan.manifold.metric
-        # Switch meters in the real world to radians on the torus, to get the ground truth
-        torus_gt = np.zeros((cfg.n_steps, 3))
-        phased = metric.to_phase(world_pos[:, :2] * scale)    # (T, 2)
-        torus_gt[:, 0] = (np.pi + phased[:, 0]) % (2 * np.pi)
-        torus_gt[:, 1] = (np.pi + phased[:, 1]) % (2 * np.pi)
-        torus_gt[:, 2] = 0.0   # flat arena, θ₃ stays the same
-
+        # Switch meters in the real world to radians on the torus, to get the ground truth, 
+        world_scaled = world_pos * scale                   
+        phased = metric.to_phase(world_scaled)               # applies 3×3 B_inv.T to all dims
+        torus_gt = (np.pi + phased) % (2 * np.pi) # TODO:
         return world_pos, v_body_seq, torus_gt
     
