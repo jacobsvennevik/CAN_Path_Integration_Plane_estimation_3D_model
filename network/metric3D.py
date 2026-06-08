@@ -8,7 +8,7 @@ class HexagonalPeriodicMetric(Metric):
     Intuitivly, this is what glues the edges of the nerual sheets together so that the torus is periodic.  
     """
 
-    def __init__(self, dim=3, period=2*np.pi, lattice="fcc"):
+    def __init__(self, dim=3, period=2*np.pi, lattice="hex"):
         self.dim, self.period = dim, period
         if lattice == "hex":                              # original: hex(xy) ⊗ periodic z
             self.B_unit  = np.array([[1.0, 0.5], [0.0, np.sqrt(3)/2]])
@@ -82,5 +82,5 @@ class HexagonalPeriodicMetric(Metric):
         Inverse of to_phase. Used when you need decoded position in metres."""
         t = np.asarray(theta, dtype=float).copy()
         c = self._coupled
-        t[..., :c] = t[..., :c] @ self.B_unit.T @ self.B_unit.T
+        t[..., :c] = t[..., :c] @ self.B_unit.T
         return t
