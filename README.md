@@ -1,26 +1,61 @@
 # CAN_Path_Integration_Plane_estimation_3D_model
 
-Had to change the MADE package so its downlaoded locally for me ./.venv/lib/python3.14/site-packages/made/manifolds.py.
+A continuous-attractor model of 3D grid cells where path integration is done relative to a
+Bayesian-estimated reference plane instead of a single global lattice. The goal is to explain
+why grid fields in 3D are locally ordered but globally unordered : if the brain integrates relative to a noisily estimated plane, local spacing survives
+but global order breaks down.
 
-SUMMARY:
-This project investigates how grid cells active during three-dimensional navigation can be locally ordered yet globally unordered. We propose that this loss of global order arises because path integration is performed relative to different noisy estimates of reference planes rather than a single global lattice. To test this hypothesis, we will extend the grid cell continuous attractor network (CAN) model of Fernández-León et al. (2022) into a plane-based “2.5D” model following Gong and Yu (2021). In this extension, velocity inputs are integrated relative to a reference plane, while place cells provide anchoring to limit drift accumulation. Changes in plane estimates are expected to keep the local grid structure while gradually disrupting the global grid organization. Experiments will be conducted using a simulated drone agent in three environments: a 2D baseline arena, a fully volumetric 3D environment, and a plane switching manifold. 
+Two parts: (1) a 3D CAN on the torus **T³** built with the **MADE**(Claudi et al., 2025). The plan is to change it a little bit with Burak & Fiete (2009) inhibitory centre-surrond inhibition kerne; and (2) a recursive
+Bingham filter on S² (Kurz et al., 2014) that estimates the reference-plane normal from motion
+and keeps a running belief. This replaces the fixed projection + injected von Mises–Fisher noise of
+Gong & Yu (2021) with a genuinely 3D integrator and a real estimator.
 
-
-The neuron grid model is from the generalized DREAM framework for deriving CAN models with any topology. We are implementing a T^3.
-
-For information about the implementasion of the project, both what I am currently working on and the implemented changes. Go to [docs/implementation/]
-The repo root contains `network/` (CAN/QAN primitives), `plane_estimation.py`, `path_integration.py`, and `experiments/` (simulation harness). Notebooks live under `notebooks/`; outputs go in `results/` (gitignored).
-
-
-REFERENCES:
-- Fernandez-Leon, J.A., Uysal, A.K. & Ji, D. (2022) Place cells dynamically refine grid cell activities to reduce error accumulation during path integration in a continuous attractor model. Sci Rep 12, 21443. https://doi.org/10.1038/s41598-022-25863-2
-- Burak, Y., & Fiete, I. R. (2009). Accurate Path Integration in Continuous Attractor Network Models of Grid Cells. PLoS Computational Biology, 5(2), e1000291. https://doi.org/10.1371/journal.pcbi.1000291
-- Gong, Z., & Yu, F. (2021). A Plane-Dependent Model of 3D Grid Cells for Representing Both 2D and 3D Spaces Under Various Navigation Modes. Frontiers in Computational Neuroscience, 15. https://doi.org/10.3389/fncom.2021.739515
+> **Setup note:** the MADE package is patched locally at
+> `./.venv/lib/python3.14/site-packages/made/manifolds.py` (Python 3.14 venv).
+The MADE package used is a bit changed, so not the one that you get from poå
 
 
+## Files
+
+**Manifold & network**
+- `torus3D_manifold.py` — defines the T³ torus and neuron coordinates.
+- `metric3D.py` — twisted-torus distance the connectivity is built from (hexagonal in θ₁θ₂; θ₃ not yet coupled).
+- `metrics.py` — small angular-difference helper for the error metric.
+- `CAN3D.py` — one continuous attractor network (single bump).
+- `QAN3D.py` — six CANs (3 axes × ± direction) giving velocity-driven movement.
+- `torch_backend.py` — runs the network on GPU/CPU using an FFT recurrence; decodes the bump position.
+
+**Plane filter & integration**
+- `plane_estimation.py` — the recursive Bingham filter on S² (estimates the plane normal n̂).
+- `path_integration.py` — glues it together: filter → n̂ → rotate velocity → drive the CAN → decode.
+
+**Experiments**
+- `base.py` — shared run loop and the `.npz` output format the scorer reads.
+- `config.py` — single source of network/experiment parameters.
+- `arena_2d.py` — the flat-floor 2D baseline (a reflecting random walk).
+
+**Scoring**
+- `gongyu_scoring.py` — Gong & Yu's structure-score code (FCC/HCP/columnar), ported with fixes.
+- `scoring.py` — the project's scoring API: rate maps → autocorrelation → structure scores.
+- `prototypes.py` — ideal FCC/HCP/COL/random lattices to compare real runs against.
+
+**Other**
+- `visualize3D.py`, `utils3D.py` — plotting and batch-simulation helpers.
+- `notebooks/` — step-by-step checks (connectivity, filter, manifold, full pipeline, scoring).
+- Outputs go in `results/` (gitignored). See `docs/implementation/` for the full per-module reference.
+
+## Key references
+
+- Burak & Fiete (2009), *PLoS Comput. Biol.* — the base grid-cell CAN.
+- Claudi, Chandra & Fiete (2025), *eLife* (reviewed preprint) — the MADE framework. https://doi.org/10.7554/eLife.107224.1
+- Gong & Yu (2021), *Front. Comput. Neurosci.* — the plane-based 3D model we refine.
+- Kurz, Gilitschenski, Julier & Hanebeck (2014), *J. Adv. Inf. Fusion* — the recursive Bingham filter.
+- Ginosar et al. (2021), *Nature*; Grieves et al. (2021), *Nat. Neurosci.* — the 3D grid-cell findings being explained.
 
 ## Acknowledgements
-The class CAN-model is based on the following implementasion, and was used a starting point for our extension https://github.com/changmin-yu/grid-cell-models-python/blob/main/burak_fiete_2009.py
-The initial controller is from Fernandez-Leon and forked from his repository.
-The plane estimation code is heaoliy inspired from Gong And Yu´s code and repository:
-https://github.com/gongziyida/GridCells3D
+
+- CAN model started from changmin-yu's Burak–Fiete implementation:
+  https://github.com/changmin-yu/grid-cell-models-python/blob/main/burak_fiete_2009.py
+- Scoring code ported from Gong & Yu: https://github.com/gongziyida/GridCells3D
+- Plane filter follows Kurz et al. (2014). *(The project began as a fork of the Fernández-León et al.
+  2022 controller; its place-cell anchoring has since been replaced by the Bingham plane filter.)*
