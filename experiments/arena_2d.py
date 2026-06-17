@@ -16,6 +16,7 @@ class Arena2DExperiment(BaseExperiment):
     ratemap_ndim          = 2        
     ratemap_n_sub         = 300      # blind random draw from the full N
     ratemap_seed          = 0        # independent of cfg.seed; for reproducible subsample
+    ratemap_n_shuffle     = 50       # <-- ADD: enables circular-shift Z (sinfo_z/sidx_z)
     ratemap_active_thresh = 1e-3     # inherited default, restated for visibility
         
     def generate_trajectory(self):
@@ -47,7 +48,6 @@ class Arena2DExperiment(BaseExperiment):
                     new_pos = world_pos[t - 1] + v 
             world_pos[t] = new_pos
             v_body_seq[t] = v
-
         #TODO: move block into base same as 3D
         metric = self.qan.manifold.metric
         # Switch meters in the real world to radians on the torus, to get the ground truth, 
