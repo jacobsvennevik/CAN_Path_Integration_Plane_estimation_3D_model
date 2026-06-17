@@ -645,7 +645,10 @@ def score_run(npz_path: str, n_neuron: int = 300, seed: int = 0,
 
 def run_with_online_ratemap(exp, g, bins: int = 40, n_warmup: int = 100,
                             mode: str = "integrate",
-                            trajectory=None) -> dict:
+                            trajectory=None,
+                            n_shuffle: int = 0,
+                            shuffle_min_lag_frac: float = 0.1,
+                            seed: int = 0) -> dict:
     """Memory light 2-D run (just the XY floor).
 
     We add the activity up into a (bins², N) map on the device as we go, so the huge
@@ -660,12 +663,16 @@ def run_with_online_ratemap(exp, g, bins: int = 40, n_warmup: int = 100,
                  Hand this in to reuse a path you already have from
                  run_experiment(), so we do not run the network a second time
                  just to get the same path back.
+    n_shuffle  : number of time-lag shuffle maps to build online (0 = disabled).
+                 When > 0, shuf_sums is returned and can be passed to
+                 score_2d_from_map for sinfo_z / sidx_z without storing the
+                 full per-step activity buffer.
+    shuffle_min_lag_frac : minimum lag as fraction of T (mirrors run_3d_online).
+    seed       : RNG seed for lag sampling.
     """
     from path_integration import PathIntegrator
 
     cfg   = exp.config.experiment
-    # build the integrator from the stored kwargs. Do NOT reach for exp.integrator,
-    # it is not a thing on BaseExperiment.
     integ = PathIntegrator(qan=exp.qan, **exp.integrator_kwargs)
     bk    = integ.backend
     dev   = getattr(bk, "device", torch.device("cpu"))
@@ -686,6 +693,23 @@ def run_with_online_ratemap(exp, g, bins: int = 40, n_warmup: int = 100,
     sums   = torch.zeros((bins * bins, N), dtype=torch.float32, device=dev)
     counts = torch.zeros(bins * bins,      dtype=torch.float32, device=dev)
 
+    # shuffle accumulators — only allocated when asked for
+    shuf_sums_d = None
+    rng = np.random.default_rng(seed)
+    if n_shuffle > 0:
+        min_lag = max(1, int(T * shuffle_min_lag_frac))
+        if min_lag >= T:
+            warnings.warn(
+                f"run_with_online_ratemap: T={T} too short for n_shuffle={n_shuffle} "
+                f"(min_lag={min_lag} >= T). Disabling shuffle.",
+                UserWarning, stacklevel=2,
+            )
+            n_shuffle = 0
+        else:
+            lags        = rng.integers(min_lag, T, size=n_shuffle)
+            shuf_sums_d = torch.zeros(
+                (n_shuffle, bins * bins, N), dtype=torch.float32, device=dev)
+
     theta_hist = np.zeros((T, 3), dtype=np.float32)
     for t in range(T):
         if mode == "integrate":
@@ -697,10 +721,20 @@ def run_with_online_ratemap(exp, g, bins: int = 40, n_warmup: int = 100,
         b = int(flat_2d[t])
         sums[b]   += s
         counts[b] += 1.0
+        if shuf_sums_d is not None:
+            for j in range(n_shuffle):
+                b_shuf = int(flat_2d[(t + lags[j]) % T])
+                shuf_sums_d[j, b_shuf] += s
+
+    shuf_sums = None
+    if shuf_sums_d is not None:
+        shuf_sums = shuf_sums_d.cpu().numpy().reshape(
+            n_shuffle, bins, bins, N)
 
     return dict(
         sums=sums.cpu().numpy().reshape(bins, bins, N),
         counts=counts.cpu().numpy().reshape(bins, bins),
+        shuf_sums=shuf_sums,
         bins=bins, world_pos=world_pos, torus_gt=torus_gt, theta_hist=theta_hist,
     )
 
@@ -1003,10 +1037,17 @@ def score_2d_from_map(
     *,
     sigma: float = SMOOTH_SIGMA,
     active_mask: np.ndarray | None = None,
+    shuf_sums: np.ndarray | None = None,
     occ_warn: float = 0.3,
 ) -> dict:
     """Score a 2-D rate map already built by run_with_online_ratemap.
 
+    Parameters
+    ----------
+    shuf_sums : (n_shuffle, bins, bins, n_sub) or None
+        Pre-built time-lag shuffle maps from the online run (result.shuf_sums).
+        When provided, sinfo_z and sidx_z are computed via _online_shuffle_zscores.
+        When None, sinfo_z and sidx_z are returned as None.
     """
     bins    = sums.shape[0]
     n_total = sums.shape[-1]
@@ -1014,9 +1055,10 @@ def score_2d_from_map(
     scored_idx = (np.where(active_mask)[0] if active_mask is not None
                   else np.arange(n_total))
 
-    f   = _rate_map_from_accumulator(sums[..., scored_idx], counts, sigma=sigma)
-    p   = counts / (counts.sum() + 1e-30)
-    occ = float((p > 0).mean())
+    f     = _rate_map_from_accumulator(sums[..., scored_idx], counts, sigma=sigma)
+    p     = counts / (counts.sum() + 1e-30)
+    denom = np.where(counts > 0, counts, 1.0)[..., None]
+    occ   = float((p > 0).mean())
 
     if occ < occ_warn:
         warnings.warn(
@@ -1035,16 +1077,26 @@ def score_2d_from_map(
     ring_found = np.isfinite(hgs)
     grid_like  = ring_found & (hgs > 0.3)
 
+    sinfo = _spatial_info(p, f)
+    sidx  = _sparsity_idx(p, f)
+
+    sinfo_z, sidx_z = None, None
+    if shuf_sums is not None:
+        sinfo_z, sidx_z = _online_shuffle_zscores(
+            shuf_sums, scored_idx, denom, p, sigma, sinfo, sidx)
+
     return dict(
-        f          = f,      #  smoothed rate maps
-        ac         = ac,     #  autocorrelograms 
-        p          = p,      # occupancy
+        f          = f,
+        ac         = ac,
+        p          = p,
         hgs        = hgs,
         sgs        = sgs,
         grid_like  = grid_like,
         ring_frac  = float(ring_found.mean()),
-        sinfo      = _spatial_info(p, f),
-        sidx       = _sparsity_idx(p, f),
+        sinfo      = sinfo,
+        sidx       = sidx,
+        sinfo_z    = sinfo_z,
+        sidx_z     = sidx_z,
         peak       = f.max(axis=(0, 1)),
         occupancy  = occ,
         n_active   = n_scored,
