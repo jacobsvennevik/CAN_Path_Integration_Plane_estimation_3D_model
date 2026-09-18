@@ -1,268 +1,187 @@
 import numpy as np
-from scipy.integrate import dblquad
-from scipy.linalg import eigh
+from scipy.special import iv, ive
 import matplotlib.pyplot as plt
 
 """
-Implementasion of a recurrent Bingham distribution filter using Kurz et al. 2014 
-see references. 
+Recursive von Mises-Fisher filter on S^2, following Kurz et al. (2016),
+See references.
 
 """
 
-class BinghamDistribution:
-    """
-    Represents a single 2D Bingham distribution.
-    
-    M : (3,3) orthogonal matrix
-        Defines the orientation of the distribution in space.
-        The last column is the mode, the most probable plane normal.
-        Columns must be perpendicular unit vectors.
-    
-    Z : (3,3) diagonal matrix
-        Defines the concentration, how certain the distribution is.
-        Z = diag(z1, z2, 0) where z1 <= z2 <= 0 always.
-        z1 : concentration along m1 
-        z2 : concentration along m2 
-        The third is fixed at 0
-        The more negative it is the more certain the estimation is, 
-        and the smaller spread of the probability distribution. And opposite
-        the closer to 0 the more uncertain.
-        
-        
-    """
-    def __init__(self, M, Z):
-        M = np.array(M, dtype=float) 
-        Z = np.array(Z, dtype=float)
+D = 3 
 
-        self.M = M
-        self.Z = Z
-        self.z1 = Z[0, 0]
-        self.z2 = Z[1, 1]
 
+def A_d(kappa, d=D):
+    """ Computes the length of the mean resultant vector."""
+    if kappa <= 0.0:
+        return 0.0
+    if not np.isfinite(kappa):
+        return 1.0
+    return float(ive(d / 2.0, kappa) / ive(d / 2.0 - 1.0, kappa))
+
+
+def A_d_inverse(r, d=D, iters=3, kappa_max=1e6):
+    """ Computes the inverse of the length of the mean resultant vector. Meaning 
+    what kappa would produce a mean resultant vector of length r.
+    """
+    r = float(np.clip(r, 0.0, 1.0))
+    if r <= 0.0:
+        return 0.0
+    if r >= 1.0:
+        return kappa_max
+    # Initial guess for kappa
+    kappa = r * (d - r ** 2) / (1.0 - r ** 2)
+    for _ in range(iters): #Newton method on top of that guess.
+        a = A_d(kappa, d)
+        kappa = kappa - (a - r) / (1.0 - a ** 2 - (d - 1.0) / kappa * a)
+    return float(min(max(kappa, 0.0), kappa_max))
+
+
+def c_d(kappa, d=D):
+    """ Computes the normalization constant for the von Mises-Fisher distribution."""
+    return kappa ** (d / 2.0 - 1.0) / ((2.0 * np.pi) ** (d / 2.0) * iv(d / 2.0 - 1.0, kappa))
+
+
+class VonMisesFisherDistribution:
+    """ The von Mises-Fisher distribution on the sphere. Holds the filter state."""
+    def __init__(self, mu, kappa):
+        mu = np.asarray(mu, dtype=float)
+        self.mu = mu / np.linalg.norm(mu)
+        self.kappa = float(kappa)
 
     @property
-    def mode(self):
-        return self.M[:, -1] #Returns the mode, most probable plane normal direction
-
-    @property
-    def A(self):
-        """The distribution in its exponent form, exp(x^T A x) / F.
-
-        M and Z are the eigendecomposition of A, so this is the same object seen
-        from the other side; it is what composes under multiplication.
-        """
-        return self.M @ self.Z @ self.M.T
+    def mode(self): 
+        """ Returns the mode of the distribution, the most likely direction."""
+        return self.mu
 
     def pdf(self, x):
-        """
-        The probability density function of the Bingham function. Taken from the paper. 
-        Uses M, Z and F 
-        Outputs: a probability density
-        """
-        x = np.asarray(x, dtype=float) 
-        F = compute_F(self.z1, self.z2) #normalisation constant
-        return np.exp(x @ self.A @ x) / F
+        """ Evaluates the density at a point, diganostic"""
+        x = np.asarray(x, dtype=float)
+        return c_d(self.kappa) * np.exp(self.kappa * (x @ self.mu))
 
-    #TODO: also more debugging can remove this later
     def __repr__(self):
-        return (f"BinghamDistribution(\n"
-                f"  M={self.M},\n"
-                f"  Z={self.Z},\n"
-                f"  mode={self.mode}\n"
-                f"  z1={self.z1:.4f}, z2={self.z2:.4f}\n)")
-        
-def _integrand(phi, t, z1, z2):
-    """
-    Integrand for the Bingham normalisation constant on S².
-    """
-    return np.exp(z1 * (1 - t**2) * np.cos(phi)**2
-                + z2 * (1 - t**2) * np.sin(phi)**2)
-
-def compute_F(z1, z2):
-    """
-    Computes the normalisation constant.
-    with Z = diag(z1, z2, 0).
-    
-    Used to analyse results, during experiemnts we will use lookup tables.
-    Beacuse of the computasional overhead of computing confluent hypergeometric function.
-    
-    
-    Uses z1, z2 - concetration parameters
-    """
-    #Calculates the double integral, with limits -1,1 for the outer integral over t
-    # And the inner integral over phi
-    val, _ = dblquad(_integrand, -1, 1, 0, 2*np.pi, args=(z1, z2))
-    return val
+        return (f"VonMisesFisherDistribution(\n"
+                f"  mu={np.round(self.mu, 4)},\n"
+                f"  kappa={self.kappa:.4f}\n)")
 
 
-
-def _bingham_from_A(A):
-    """Recover (M, Z) from an exponent matrix, enforcing the z3 = 0 convention.
-
-    eigh returns eigenvalues ascending, so subtracting the last one shifts the
-    largest to zero. That shift is a constant in the exponent and so is absorbed
-    by the normalisation, which is why it is free to impose.
-    """
-    eigenvalues, eigenvectors = eigh(A)
-    return BinghamDistribution(eigenvectors, np.diag(eigenvalues - eigenvalues[-1]))
-
-
-def multiply_bingham(b1, b2):
-    """
-    The bayesian update opperation. Since Bingham probability PDF´s is closed under multiplication,
-    this return an exact with no approximation. 
-    
-    FORMULA:
-    Equation (12)
-    """
-    #From equation (12), multiplying two Bingham densities adds their exponents
-    return _bingham_from_A(b1.A + b2.A)
-
-
-def predict(estimate, rho):
-    """
-    Does an approximation of isotropic diffusion on S^2, meaning spread the distribution outward uniformly.
-    This is a departue and simplification of the kurz paper
-
-    rho: Bingham concentration decay ρ — multiplies Z on the predict step.
-    """
-    #Add a slight uncertinity to the plane normal estimation
-    Z_pred = rho * estimate.Z
-    # Last diagonal entry has to be 0
-    Z_pred[2, 2] = 0.0
-    #M left unchanged, new more uncertain Z
-    return BinghamDistribution(estimate.M.copy(), Z_pred)
+def deterministic_sampling(mu, kappa, d=D):
+    """Algorithm 1, from kurz (2016) paper. 
+    Samples point whose vector average has exactly length A_d(κ)"""
+    # Initialize the sample matrix S
+    S = np.zeros((d, 2 * d - 1))
+    S[0, 0] = 1.0
+    # compute the target length the samples should integrete to
+    m1 = A_d(kappa, d)
+    #Solves for the one tilt angle a that makes the points own resultant length equal m1.
+    alpha = np.arccos(((2 * d - 1) * m1 - 1.0) / (2 * d - 2))
+    for i in range(1, d):
+        S[0, 2 * i - 1] = np.cos(alpha)
+        S[0, 2 * i] = np.cos(alpha)
+        S[i, 2 * i - 1] = np.sin(alpha)
+        S[i, 2 * i] = -np.sin(alpha)
+    # Rotate the samples to the desired direction.
+    M = np.zeros((d, d))
+    M[:, 0] = np.asarray(mu, dtype=float)
+    Q, R = np.linalg.qr(M)
+    if R[0, 0] < 0:
+        # sign check ensures you land on μ rather than −μ.
+        Q = -Q
+    return Q @ S
 
 
-def update(prediction, measurement, kappa):
+def parameter_estimation(S, weights=None, d=D, tol=1e-12):
+    """ the inverse of sampling. Given a cloud of points fit the vMF."""
+    S = np.asarray(S, dtype=float)
+    n = S.shape[1]
+    w = np.full(n, 1.0 / n) if weights is None else np.asarray(weights, dtype=float)
+    # compute the mean of the samples
+    m = S @ w
+    r = float(np.linalg.norm(m))
+    if r < tol:
+        return None, 0.0
+    return m / r, A_d_inverse(r, d)
+
+
+def predict(estimate, kappa_w, a=None, d=D):
+    """the forgetting step. Advances the belief one step and lets confidence decay. This is the one approximation in the filter"""
+    #Step 1: scatter 5 representative points
+    S = deterministic_sampling(estimate.mu, estimate.kappa, d)
+    #Step 2: push each through the system function a_k.
+    if a is not None:
+        S = np.column_stack([a(S[:, i]) for i in range(S.shape[1])])
+    #Step 3: re-fit. A uniform state predicts to a uniform state, keeping the placeholder direction mu.
+    mu, kappa = parameter_estimation(S, d=d)
+    if mu is None:
+        #Return a uniform state if mu is none
+        return VonMisesFisherDistribution(estimate.mu, 0.0)
+    #Step 4: return the new estimate.
+    return VonMisesFisherDistribution(mu, A_d_inverse(A_d(kappa, d) * A_d(kappa_w, d), d))
+
+
+def update(prediction, measurement, kappa_v):
     """
     This is the Bayesian update step.
     Corrects the prediction using a new measurement.
     """
-    A_likelihood = -kappa * np.outer(measurement, measurement)
-    #Bayes rule, + becasue it is applied to distributions inside an exponent
-    return _bingham_from_A(prediction.A + A_likelihood)
+    measurement = np.asarray(measurement, dtype=float)
+    measurement = measurement / np.linalg.norm(measurement)
+    #compute the new its exact because both exponents are linear in x, so they simply add.
+    theta = prediction.kappa * prediction.mu + kappa_v * measurement
+    kappa = float(np.linalg.norm(theta))
+    mu = theta / kappa if kappa > 0.0 else prediction.mu
+    return VonMisesFisherDistribution(mu, kappa)
 
 
-def run_bingham_filter(initial_estimate, measurements, kappa, rho=0.999):
-    """
-    This is the complete reccursive Bingham distribution filter. 
+def run_vmf_filter(initial_estimate, measurements, kappa_v, kappa_w=100.0):
+    """Runs the recursive (bayesian) vMF filter.
     
     Predict then update, repeat. 
     """
     estimates = []
     current = initial_estimate
-    #loop over each displacement vector
-    for displacement in measurements:
-        predicted = predict(current, rho)      # mode fixed, Z deflated by ρ
-        current = update(predicted, displacement, kappa)  # accumulate displacement evidence
+    for z in measurements:
+        #forget first, then learn.
+        current = update(predict(current, kappa_w), z, kappa_v)
         estimates.append(current)
- 
     return estimates
- 
 
 
 def uniform_prior():
-    """Uniform distribution on S². Maximum uncertainty about the plane normal."""
-    return BinghamDistribution(np.eye(3), np.zeros((3, 3)))
-
-def plane_axes(n):
+    """Returns a uniform prior, which is a vMF pointing north with kappa = 0. 
+        Just a starign state.
     """
-    Returns two orthonormal vectors e1, e2 that span the plane
-    perpendicular to unit vector n. As well as unit vector n
+    return VonMisesFisherDistribution(np.array([0.0, 0.0, 1.0]), 0.0)
+
+
+def init_from_normal_guess(n_hat_guess, kappa=0.1):
     """
-    n   = np.asarray(n, dtype=float)
-    n  /= np.linalg.norm(n)
-    
-    ## Gram-Schmidt: build two axes perpendicular to n
-    arb = np.array([1., 0., 0.]) if abs(n[0]) < 0.9 else np.array([0., 1., 0.])
-    e1  = arb - (arb @ n) * n
-    e1 /= np.linalg.norm(e1)
-    e2  = np.cross(n, e1)
-    return e1, e2, n
-
-
-
-def init_from_normal_guess(n_hat_guess, z1=-0.1, z2=-0.1):
+    Weak prior centered on the guessed plane normal.
     """
-    Weak prior centred on a guessed plane normal.
+    return VonMisesFisherDistribution(n_hat_guess, kappa)
 
-    Builds an orthonormal frame with n_hat_guess as the mode.
-    z1, z2 small negative means weak prior. More negative meanse more certain.
+
+def angular_error_s2(est_mode, n_true):
+    """ Use for visualisation and checking in experiemnts """
+    dot = np.clip(np.dot(est_mode, n_true), -1.0, 1.0)
+    return np.rad2deg(np.arccos(dot))
+
+
+def vmf_pdf_on_sphere(estimate, n_points=100):
     """
-
-    e1, e2, n_normalised = plane_axes(n_hat_guess)
-
-    M = np.column_stack([e1, e2, n_normalised])  # last column is the mode
-    Z = np.diag([z1, z2, 0.0])
-    return BinghamDistribution(M, Z)
-
-
-#TODO not working
-def flip_mode(b: BinghamDistribution) -> BinghamDistribution:
+    Visualisation helper
     """
-    Flip the mode of a Bingham distribution to its antipode.
-    """
-    M_flipped = b.M.copy()
-    M_flipped[:, -1] = -M_flipped[:, -1]
-    return BinghamDistribution(M_flipped, b.Z.copy())
+    theta = np.linspace(0, np.pi, n_points)
+    phi = np.linspace(0, 2 * np.pi, n_points)
+    T, P = np.meshgrid(theta, phi)
 
-
-def bingham_pdf_on_sphere(estimate, F, n_points=100):
-    """
-    Visulaisation helper
-    """
-    theta = np.linspace(0, np.pi,    n_points) #polar angles
-    phi   = np.linspace(0, 2*np.pi, n_points) #azimuthal angles
-    T, P  = np.meshgrid(theta, phi) #tile the sphere manifold with all possible pairings
-
-    #spherical coordinates to cartesian conversion
     X = np.sin(T) * np.cos(P)
     Y = np.sin(T) * np.sin(P)
     Z = np.cos(T)
 
-    pts  = np.stack([X, Y, Z], axis=-1)
-    vals = np.einsum('ijk,kl,ijl->ij', pts, estimate.A, pts)
-    PDF  = np.exp(vals) / F
+    pts = np.stack([X, Y, Z], axis=-1)
+    PDF = c_d(estimate.kappa) * np.exp(estimate.kappa * (pts @ estimate.mu))
 
     return X, Y, Z, PDF
 
-def angular_error_s2(est_mode, n_true):
-    """ Use for visualisation and checking in experiemnts """
-    dot = np.clip(abs(np.dot(est_mode, n_true)), 0.0, 1.0)
-    return np.rad2deg(np.arccos(dot))
 
-def plot_bingham_convergence(n_hat_hist, gap_hist, n_true,
-                             title="",
-                             figsize=(8, 5.5)):
-    """
-    Plot the recurrent Bingham plane filter over a run.
-    """
-
-    n_hat_hist = np.asarray(n_hat_hist, dtype=float)
-    gap_hist   = np.asarray(gap_hist,   dtype=float)
-    n_true     = np.asarray(n_true,     dtype=float)
-    n_true     = n_true / np.linalg.norm(n_true)
-
-    err   = np.array([angular_error_s2(n, n_true) for n in n_hat_hist])
-    steps = np.arange(1, len(err) + 1)
-
-    fig, axes = plt.subplots(2, 1, figsize=figsize, sharex=True)
-
-    axes[0].plot(steps, err, color="#d62728", lw=2)
-    axes[0].axhline(0, color="k", lw=0.5, ls="--")
-    axes[0].set_ylabel("angular error (deg)"); axes[0].set_ylim(bottom=0)
-    axes[0].set_title(title, pad=22)          # pad gives the new top axis room
-    axes[0].grid(True, alpha=0.3, ls="--")
-
-    # mirrored time axis along the top of the upper panel
-    secax = axes[0].secondary_xaxis("top", functions=(lambda x: x, lambda x: x))
-    secax.set_xlabel("time step")
-
-    axes[1].plot(steps, gap_hist, color="navy", lw=1.5)
-    axes[1].set_ylabel("certainty  z₂−z₁"); axes[1].set_xlabel("time step")
-    axes[1].set_title("Filter concentration (larger gap = more committed)")
-    axes[1].grid(True, alpha=0.3, ls="--")
-
-    fig.tight_layout()
-    return fig, axes
