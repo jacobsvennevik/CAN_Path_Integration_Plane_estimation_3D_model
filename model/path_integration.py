@@ -4,7 +4,7 @@ from typing import Optional
 import torch
 
 from model.plane_estimation import (
-    BinghamDistribution,
+    VonMisesFisherDistribution,
     predict,
     update,
     uniform_prior,
@@ -105,7 +105,7 @@ class PathIntegrator:
         than the tracking window is wide, which loses it. Nothing has moved during
         warmup, so the position afterwards is still the seed position.
         """
-        zero_v = np.zeros(3)
+        zero_v = np.zeros(self.qan.manifold.dim)
         for _ in range(n_steps):
             self.backend.step(zero_v)
             self._bingham_state = predict(self._bingham_state, self.rho)
@@ -188,10 +188,10 @@ class PathIntegrator:
         """
 
         T = v_body_sequence.shape[0] #total timesteps
-        dim = self.qan.manifold.dim
+        torus_dim = self.qan.manifold.dim
         dev = self.backend.device
         N   = self.backend.S.shape[1]
-        theta_history = np.zeros((T, dim)) #place to store decoded positions
+        theta_history = np.zeros((T, torus_dim)) #place to store decoded positions
 
         # history goes into flat arrays now, not growing lists
         _h_n_hat   = np.empty((T, 3),   dtype=np.float64)
@@ -199,7 +199,7 @@ class PathIntegrator:
         _h_z2      = np.empty(T,         dtype=np.float64)
         _h_v_body  = np.empty((T, 3),   dtype=np.float64)
         _h_v_alloc = np.empty((T, 3),   dtype=np.float64)
-        _h_tsr     = np.empty((T, dim), dtype=np.float64)
+        _h_tsr     = np.empty((T, 3), dtype=np.float64)  # (c) world 3-vector
 
         # small on-device buffer, decode + dump to CPU once it fills (keeps memory bounded)
         chunk = min(self.decode_chunk, T)
@@ -310,7 +310,7 @@ class PathIntegrator:
         """
         return self._bingham_state.z2 - self._bingham_state.z1
 
-    def reset(self, theta_0: np.ndarray, initial_estimate: Optional[BinghamDistribution] = None):
+    def reset(self, theta_0: np.ndarray, initial_estimate: Optional[VonMisesFisherDistribution] = None):
         """
         Reset filter and CAN states without rebuilding the full object.
         For running multiple trials with the same QAN hyperparameters.

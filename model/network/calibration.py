@@ -1,16 +1,35 @@
-"""Measure bump speed vs commanded speed, then set velocity_gain so they match."""
+"""Measure bump speed vs commanded speed, then set velocity_gain so they match.
+Possibly only useful in the three dimensional case.
+"""
 
 import numpy as np
 
-DIRS = {
-    "+x": (1.0, 0.0, 0.0),
-    "-x": (-1.0, 0.0, 0.0),
-    "+y": (0.0, 1.0, 0.0),
-    "+z": (0.0, 0.0, 1.0),
-    "110": (1.0, 1.0, 0.0),
-    "111": (1.0, 1.0, 1.0),
-}
 
+def dirs_for(d: int) -> dict:
+    """Torus-axis directions of length `d` (not world axes)."""
+    names = ("x", "y", "z")
+    out = {}
+    for i in range(d):
+        e = np.zeros(d, dtype=float)
+        e[i] = 1.0
+        label = names[i] if i < 3 else str(i + 1)
+        out[f"+{label}"] = e.copy()
+        out[f"-{label}"] = -e
+        out[f"+θ{i+1}"] = e.copy()
+        out[f"-θ{i+1}"] = -e.copy()
+    ones = np.ones(d, dtype=float)
+    out["all"] = ones
+    out["111"] = ones
+    if d >= 2:
+        e = np.zeros(d, dtype=float)
+        e[0] = 1.0
+        e[1] = 1.0
+        out["110"] = e
+    return out
+
+
+# 3-D aliases kept so existing notebooks that import DIRS still resolve.
+DIRS = {k: tuple(v) for k, v in dirs_for(3).items()}
 CAL_DIRS = ("+x", "111")
 
 
@@ -29,26 +48,37 @@ def _peakedness(backend) -> float:
     return float(s.max()) / m if m > 1e-12 else float("nan")
 
 
+def _resolve_direction(backend, direction):
+    if isinstance(direction, str):
+        table = dirs_for(backend.d)
+        if direction not in table:
+            raise KeyError(f"unknown direction {direction!r} for d={backend.d}")
+        direction = table[direction]
+    return _unit(direction)
+
+
 def measure(backend, theta_0, direction, speed, n_meas=None, burn=None,
             periods=10.0):
     """Drive at constant speed, fit the bump velocity, put the state back."""
     dt = float(backend.qan.dt)
     tau = float(backend.tau)
-    u = _unit(direction)
+    u = _resolve_direction(backend, direction)
     theta_0 = np.asarray(theta_0, dtype=np.float64)
+    shp = float(backend.n)
+    extent = 2.0 * np.pi
 
     period_cells = float(backend.bump_period_cells())
-    period_rad = period_cells * 2.0 * np.pi / backend.n
+    period_coord = period_cells * (extent / shp)
     if burn is None:
         burn = int(np.ceil(50.0 * tau / dt))
     if n_meas is None:
-        n_meas = int(np.ceil(float(periods) * period_rad / (speed * dt)))
+        n_meas = int(np.ceil(float(periods) * period_coord / (speed * dt)))
 
     S0 = backend.S.clone()
     pk_before = _peakedness(backend)
 
     T = int(burn) + int(n_meas)
-    traj = (theta_0 + u * speed * np.arange(T)[:, None] * dt) % (2.0 * np.pi)
+    traj = (theta_0 + u * speed * np.arange(T)[:, None] * dt) % extent
     backend.drive(traj, display_stride=T + 1, snapshot_stride=T + 1)
     pos = backend.pos_com_unwrapped
 
@@ -59,7 +89,8 @@ def measure(backend, theta_0, direction, speed, n_meas=None, burn=None,
     v_hat = coef[0]
     ripple = float(np.sqrt(((seg - A @ coef) ** 2).sum(axis=1).mean()))
 
-    steps = np.linalg.norm(np.diff(pos, axis=0), axis=1) * (backend.n / (2.0 * np.pi))
+    d_cells = np.diff(pos, axis=0) * shp / extent
+    steps = np.linalg.norm(d_cells, axis=1)
     max_step = float(steps.max()) if steps.size else 0.0
 
     pk_after = _peakedness(backend)
@@ -91,16 +122,21 @@ def measure(backend, theta_0, direction, speed, n_meas=None, burn=None,
     )
 
 
-def fit_gain(backend, theta_0, speed, tol=0.02, max_iter=2, dirs=CAL_DIRS,
+def fit_gain(backend, theta_0, speed, tol=0.02, max_iter=2, dirs=None,
              **kw):
     """Measure on +x and 111, then scale velocity_gain so g ≈ 1.
 
+    At general d this is axis-0 and the all-ones direction.
     Returns (velocity_gain, g). Restores the old gain if the lattice died.
     """
+    if dirs is None:
+        dirs = CAL_DIRS if backend.d == 3 else ("+θ1", "all")
     vg0 = float(backend.qan.velocity_gain)
     g = float("nan")
+    table = dirs_for(backend.d)
     for _ in range(int(max_iter)):
-        rows = [measure(backend, theta_0, DIRS[d], speed, **kw) for d in dirs]
+        rows = [measure(backend, theta_0, table[d] if isinstance(d, str) else d,
+                        speed, **kw) for d in dirs]
         if not all(r["ok"] for r in rows):
             backend.qan.velocity_gain = vg0
             bad = next(r for r in rows if not r["ok"])

@@ -2,36 +2,42 @@ from made.can import CAN, relu
 from dataclasses import dataclass, field
 import numpy as np
 
-def torus_grid(n: int) -> np.ndarray:
-    """Coordinates of every neuron on an n x n x n torus lattice."""
-    return (np.indices((n, n, n)).reshape(3, -1).T) * (2 * np.pi / n)
+def torus_grid(n: int, d: int = 3) -> np.ndarray:
+    """Coordinates of every neuron on an n^d."""
+    n = int(n)
+    d = int(d)
+    return (np.indices((n,) * d).reshape(d, -1).T) * (2 * np.pi / n)
 
 
 def kernel_field_on_grid(kernel, metric, n: int, offset=None,
-                         grid: np.ndarray = None) -> np.ndarray:
-    """Connection strength from one neuron to every neuron, as an (n, n, n) volume.
+                         grid: np.ndarray = None, d: int = None) -> np.ndarray:
+    """Connection strength from one neuron to every neuron, as an n^d volume.
 
     Measures the torus distance from every lattice point to the offset, then
     passes those distances through the kernel``.
-
 
 
     Args:
         kernel: maps distances to weights, e.g. a ``Kernel_BF``.
         metric: called as ``metric(points, centre)``; handles the wrap-around.
         n: neurons per axis.
-        offset: where to centre the kernel. Each of the QAN's six CANs shifts it
-            along one axis. None means the origin.
-        grid: a precomputed ``torus_grid(n)``, if you already have one.
+        offset: where to centre the kernel. Each of the QAN's six CANs (2d at
+            general d) shifts it along one axis. None means the origin.
+        grid: a precomputed torus_grid(n, d`, if you already have one.
+        d: manifold dimension. Inferred from grid when provided, else 3.
     """
     #Create the grid if it is not already created
+    n = int(n)
     if grid is None:
-        grid = torus_grid(n)
-    centre = np.zeros((1, 3))
+        d = 3 if d is None else int(d)
+        grid = torus_grid(n, d)
+    else:
+        d = int(grid.shape[1])
+    centre = np.zeros((1, d))
     
     if offset is not None:
         centre[0] = offset
-    return kernel(metric(grid, centre).reshape(n, n, n))
+    return kernel(metric(grid, centre).reshape((n,) * d))
 
 
 @dataclass(kw_only=True)

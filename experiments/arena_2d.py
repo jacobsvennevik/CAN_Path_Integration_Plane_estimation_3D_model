@@ -22,6 +22,7 @@ class Arena2DExperiment(BaseExperiment):
         Random walk in physical 2D space.
         Returns world_pos (sequence of positions), velocity_body_seq (sequence of speeds), 
         torus_gt (sequence of positions on the torus manifold).
+        Basicly turns the physical wlak in the box into ground truth for the torus manifold.
         """
         cfg   = self.config.experiment
         n_steps = cfg.n_steps if n_steps is None else int(n_steps)
@@ -55,5 +56,8 @@ class Arena2DExperiment(BaseExperiment):
             world_pos[t] = new_pos
             v_body_seq[t] = v
 
-        return world_pos, v_body_seq, world_to_torus_gt(world_pos, scale)
+        d = self.qan.manifold.dim
+        return world_pos, v_body_seq, world_to_torus_gt(
+            world_pos[:, :d], #keep as many axis as the the manifold has
+            scale)
     

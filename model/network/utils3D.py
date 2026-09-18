@@ -77,18 +77,15 @@ def simulate_many(
 def extract_bump_coords(final_states, can):
     """Get the bump position from each final state.
 
-    Returns shape (M, 3) array of (theta_1, theta_2, theta_3) coordinates.
+    Returns shape (M, d) array of (theta_1, ..., theta_d) coordinates.
     """
-    n1, n2, n3 = can.nx(0), can.nx(1), can.nx(2)
+    d = can.manifold.dim
+    shape = tuple(can.nx(ax) for ax in range(d))
     coords = []
     for state in final_states:
-        state_3d = state.reshape(n1, n2, n3)
-        i1, i2, i3 = np.unravel_index(np.argmax(state_3d), state_3d.shape)
-        coords.append([
-            can.idx2coord(i1, 0),
-            can.idx2coord(i2, 1),
-            can.idx2coord(i3, 2),
-        ])
+        state_nd = state.reshape(shape)
+        idx = np.unravel_index(np.argmax(state_nd), shape)
+        coords.append([can.idx2coord(idx[ax], ax) for ax in range(d)])
     return np.array(coords)
 
 

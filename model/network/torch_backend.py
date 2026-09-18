@@ -13,7 +13,7 @@ from model.network.CAN3D import kernel_field_on_grid, torus_grid
 
 
 class BumpTracker:
-    """Follows one bump on the n³ torus by local centre of mass.
+    """Follows one bump on the n^d torus by local centre of mass.
 
     Seeded at a start coordinate, find the nearest bump centre by using Argmax.
     Then advance the tracker to the next frame by finding the local centre of mass. 
@@ -21,76 +21,80 @@ class BumpTracker:
     isnt switching.
     """
 
-    def __init__(self, n: int, radius: int = 4, seed_radius: int = None):
+    def __init__(self, n: int, d: int = 3, radius: int = 4, seed_radius: int = None):
         self.n = int(n) #neurons pr axis
+        self.d = int(d)
         self.radius = int(radius) #spherical tracking window
-        self.seed_radius = int(max(self.radius, n // 8) if seed_radius is None
+        self.seed_radius = int(max(self.radius, self.n // 8) if seed_radius is None
                                else seed_radius) #inital seed window
 
         #Holds the relative coordinates of the cells in the tracking window
         off = np.arange(-self.radius, self.radius + 1) #offset grid
-        self._OX, self._OY, self._OZ = np.meshgrid(off, off, off, indexing="ij")
-        self._sphere_mask = (
-            (self._OX * self._OX + self._OY * self._OY + self._OZ * self._OZ)
-            <= self.radius * self.radius
+        self._offs = np.meshgrid(*([off] * self.d), indexing="ij")
+        self._sphere_mask = sum(o.astype(float) ** 2 for o in self._offs) <= (
+            self.radius * self.radius
         )
 
         self._soff = np.arange(-self.seed_radius, self.seed_radius + 1)
-        self._SX, self._SY, self._SZ = np.meshgrid(
-            self._soff, self._soff, self._soff, indexing="ij")
+        self._soffs = np.meshgrid(*([self._soff] * self.d), indexing="ij")
 
         self.c_prev = None   # bump centre in grid cell
         self.pos = None      # unwrapped position in radians
         self.history = [] # recoding the path of the tracker, for visualisation
 
-    def _local_com(self, S_3d: np.ndarray, c: np.ndarray) -> np.ndarray:
-        """Centre of mass of the tracking window around cell c, takes all of the activity weighted by lenth from cell c"""
+    def _window(self, volume, centre, offs):
+        """Gets the window of cells around the center cell (its a cube)"""
         n = self.n
-        ci = np.round(c).astype(int) % n #Round to an integer cell, wrap into range.
-        # Only the (2*radius+1)^3 window is upcast, not the whole volume.
-        w = S_3d[(ci[0] + self._OX) % n, (ci[1] + self._OY) % n, #the window of activity, % n is the wrapping of the torus
-                 (ci[2] + self._OZ) % n].astype(np.float64)
+        ci = np.round(centre).astype(int) % n #Round to an integer cell, wrap into range.
+        # the window of activity, % n is the wrapping of the torus
+        idx = tuple((ci[ax] + offs[ax]) % n for ax in range(self.d))
+        return volume[idx], ci
+
+    def _local_com(self, S_nd: np.ndarray, c: np.ndarray) -> np.ndarray:
+        """Centre of mass of the tracking window around cell c, takes all of the activity weighted by lenth from cell c"""
+        # Only the (2*radius+1)^d window is upcast, not the whole volume.
+        w, ci = self._window(S_nd, c, self._offs)
+        w = w.astype(np.float64, copy=True)
         np.maximum(w, 0.0, out=w) #Clip negatives
         w *= self._sphere_mask  # sphere only
 
         wsum = w.sum()
         if wsum < 1e-12:
-            return c   
-        #takes the sum of all of the activity * the position and weights it by the activity of all neurons, 
-        # see methology (x.x) for equation                                   
-        com = np.array([(self._OX * w).sum(), (self._OY * w).sum(),
-                        (self._OZ * w).sum()]) / wsum
-        return (ci + com) % n                             # sub-cell centre
+            return c
+        #takes the sum of all of the activity * the position and weights it by the activity of all neurons,
+        # see methology (x.x) for equation
+        com = np.array([(o * w).sum() for o in self._offs]) / wsum
+        return (ci + com) % self.n                             # sub-cell centre
 
-    def seed(self, S_3d: np.ndarray, theta_0: np.ndarray) -> np.ndarray:
+    def seed(self, S_nd: np.ndarray, theta_0: np.ndarray) -> np.ndarray:
         """Lock onto the strongest bump near theta_0 and start counting there."""
         n = self.n #number of neurons
         theta_0 = np.asarray(theta_0, dtype=np.float64) #starting cell
 
         c0 = np.round(theta_0 / (2 * np.pi) * n).astype(int) % n #cell window corner
-        win = S_3d[(c0[0] + self._SX) % n, (c0[1] + self._SY) % n, #The wide window, and the most active cell in it
-                   (c0[2] + self._SZ) % n]  
+        win, _ = self._window(S_nd, c0, self._soffs)  #The wide window, and the most active cell in it
         s0 = np.unravel_index(int(np.argmax(win)), win.shape) #s0 indexes into the window arrary. _soff converts back to an offset
-        c_seed = ((c0 + np.array([self._soff[s0[0]], self._soff[s0[1]], #Add the weighet avergae to the argmax cell to refine.
-                                  self._soff[s0[2]]])) % n).astype(np.float64)
+        c_seed = (
+            (c0 + np.array([self._soff[s0[ax]] for ax in range(self.d)])) % n  #Add the weighet avergae to the argmax cell to refine.
+        ).astype(np.float64)
 
         #update the previous cell to the new cell
-        self.c_prev = self._local_com(S_3d, c_seed) 
+        self.c_prev = self._local_com(S_nd, c_seed)
         self.pos = theta_0 % (2 * np.pi) #accumulate the position
         return self.pos.copy()
 
-    def advance(self, S_3d: np.ndarray) -> np.ndarray:
+    def advance(self, S_nd: np.ndarray) -> np.ndarray:
         """Follow the bump into one new frame and return the unwrapped position."""
         n = self.n
-        c_new = self._local_com(S_3d, self.c_prev) #find the new cell
-        d = wrapped_angle_diff(c_new, self.c_prev, period=n)   # smallest torus step, the distance
-        self.pos = self.pos + d / n * (2 * np.pi) #accumulate the position
+        c_new = self._local_com(S_nd, self.c_prev) #find the new cell
+        step = wrapped_angle_diff(c_new, self.c_prev, period=n)   # smallest torus step, the distance
+        self.pos = self.pos + step / n * (2 * np.pi) #accumulate the position
         self.c_prev = c_new #update the center cell
         return self.pos.copy()
 
     def advance_frames(self, volumes: np.ndarray) -> np.ndarray:
-        """Decode a (T, n, n, n) stack; tracker state carries across frames/chunks."""
-        out = np.empty((len(volumes), 3), dtype=np.float64)
+        """Decode a (T, n, ..., n) stack; tracker state carries across frames/chunks."""
+        out = np.empty((len(volumes), self.d), dtype=np.float64)
         for t, frame in enumerate(volumes):
             out[t] = self.advance(frame)
         return out
@@ -126,51 +130,62 @@ class TorchBackend:
         else:
             return torch.device("cpu")
         
+    def _fft_dims(self):
+        """Get the dimensions for the FFT"""
+        return tuple(range(-self.d, 0))
+
     def _compute_fft_kernels(self, n: int) -> torch.Tensor:
         """Pre-FFT the recurrent kernel for each of the 6 offset CANs.
-        Returns W_fft, shape (6, n, n, n//2+1), complex64."""
+
+        Returns W_fft, shape (n_cans, *([n]*(d-1)), n//2+1), complex64.
+        At d=3 that is (6, n, n, n//2+1).
+        """
         metric     = self.qan.manifold.metric
         kernel_fn  = self.qan.kernel              # the injected Kernel_BF (your B&F DoG)
         offset_mag = self.qan.offset_magnitude
 
-        grid = torus_grid(n)                      # built once, reused per offset
+        grid = torus_grid(n, d=self.d)            # built once, reused per offset
 
         fft_device = torch.device("cpu") if self.device.type == "mps" else self.device
         n_cans = len(self.qan.cans)
-        W_fft = torch.empty((n_cans, n, n, n // 2 + 1), dtype=torch.complex64,
+        shape = (n,) * self.d
+        rfft_last = n // 2 + 1
+        W_fft = torch.empty((n_cans, *shape[:-1], rfft_last), dtype=torch.complex64,
                             device=fft_device)
 
         for i, (dim, sign) in enumerate(zip(self.qan.can_dims, self.qan.can_signs)):
             # constant axis offset δ for this CAN (flat-torus Killing field)
-            delta = np.zeros(3); delta[dim] = sign * offset_mag
+            delta = np.zeros(self.d); delta[dim] = sign * offset_mag
 
-            kernel = kernel_field_on_grid(kernel_fn, metric, n, offset=delta, grid=grid)
+            kernel = kernel_field_on_grid(
+                kernel_fn, metric, n, offset=delta, grid=grid, d=self.d
+            )
 
             W_fft[i] = torch.fft.rfftn(
                 torch.as_tensor(kernel, dtype=torch.float32, device=fft_device),
-                dim=(-3, -2, -1),
+                dim=self._fft_dims(),
             )
         return W_fft
  
  
     def _apply_W_fft(self, S_shared: torch.Tensor) -> torch.Tensor:
-        n = self.n
-        N = n ** 3
+        n, d = self.n, self.d
+        N = n ** d
+        shape = (n,) * d
 
-        S_3d = S_shared[0].squeeze(-1).reshape(n, n, n)
+        S_nd = S_shared[0].squeeze(-1).reshape(shape)
 
         # Remove the .cpu() calls — stay on device for CUDA
         if self.device.type == "mps":
-            S_3d  = S_3d.cpu()
+            S_nd  = S_nd.cpu()
             W_fft = self.W_fft.cpu()
         else:
             W_fft = self.W_fft.to(self.device)  # already there after init, no-op
 
-        S_fft  = torch.fft.rfftn(S_3d, dim=(-3, -2, -1))
+        S_fft  = torch.fft.rfftn(S_nd, dim=self._fft_dims())
         Ws_fft = W_fft * S_fft.unsqueeze(0)
-        Ws_3d  = torch.fft.irfftn(Ws_fft, s=(n, n, n), dim=(-3, -2, -1))
-
-        return Ws_3d.reshape(6, N, 1).to(self.device)
+        Ws_nd  = torch.fft.irfftn(Ws_fft, s=shape, dim=self._fft_dims())
+        return Ws_nd.reshape(len(self.qan.cans), N, 1).to(self.device)
 
     def _init_torch_backend(self):
         """
@@ -180,10 +195,13 @@ class TorchBackend:
         """
         cans = self.qan.cans
 
-        # count CANs (should be 6) and neurons
+        # count CANs (should be 6 at d=3, 2d generally) and neurons
         n_cans = len(cans)
         N = cans[0].S.shape[0]
-        self.n = int(round(N ** (1/3)))    
+        self.d = int(self.qan.manifold.dim)
+        self.n = int(round(N ** (1.0 / self.d)))
+        assert self.n ** self.d == N, (self.n, self.d, N)
+        self.shape = (self.n,) * self.d
         self.W_fft = self._compute_fft_kernels(self.n)
 
         # empty space for activity states (current activity of all neurons)
@@ -271,7 +289,7 @@ class TorchBackend:
             device=self.device,
         )
 
-        coords = self.coords  # shape (N, 3)
+        coords = self.coords  # shape (N, d)
 
         # shortest signed difference between every neuron and theta_0, wrapped
         diff = wrapped_angle_diff(coords.unsqueeze(0), theta.unsqueeze(1))
@@ -307,14 +325,21 @@ class TorchBackend:
         In this way we take a step, and the bump moves.
         """
         N = S_tot.shape[0]
+        n_pops = len(self.qan.cans)
 
         #The current neural activity, gives us where the bump is currently, the mean field
-        S_shared = S_tot.unsqueeze(0).expand(6, N, 1)
-        #Apply each CANs shifted weight matricies W to the shared bump of activity       
+        S_shared = S_tot.unsqueeze(0).expand(n_pops, N, 1)
+        #Apply each CANs shifted weight matricies W to the shared bump of activity
         Ws = self._apply_W_fft(S_shared)
         #The pr CAN velocity inut
-        td  = torch.as_tensor(theta_dot, dtype=self.torch_dtype, device=self.device)  # (3,)
-        v_m  = (self.signs_torch * self.qan.drive_per_theta_dot * td[self.dims_torch]).view(6, 1, 1)
+        td = torch.as_tensor(theta_dot, dtype=self.torch_dtype, device=self.device)  # (d,)
+        if td.numel() != self.d:
+            raise ValueError(
+                f"theta_dot has {td.numel()} components, network has {self.d}. "
+                "Project the world velocity first (step 3), do not slice it."
+            )
+        v_m = (self.signs_torch * self.qan.drive_per_theta_dot
+               * td[self.dims_torch]).view(n_pops, 1, 1)
         # Apply the recurrent input to each neuron, 
         # passed through a relu and shifted up by the bias b and velocity v_m.
         drives = torch.relu(Ws + self.b + v_m)               
@@ -329,10 +354,10 @@ class TorchBackend:
 
     
     def current_volume(self) -> np.ndarray:
-        """Mean-field activity as an (n, n, n) float32 numpy array."""
+        """Mean-field activity as an n^d float32 numpy array."""
         n = self.n
         return (self.S.mean(dim=0).squeeze().detach().cpu().numpy()
-                .reshape(n, n, n))
+                .reshape((n,) * self.d))
 
     def dominant_k(self):
         """Nyquist-folded wavevector of the peak Fourier mode, and its |k|."""
@@ -342,7 +367,7 @@ class TorchBackend:
         kk = np.arange(n)
         kk = np.where(kk <= n // 2, kk, kk - n)
         i = np.unravel_index(int(F.argmax()), F.shape)
-        k = np.array([kk[i[0]], kk[i[1]], kk[i[2]]], dtype=float)
+        k = np.array([kk[i[ax]] for ax in range(self.d)], dtype=float)
         return k, float(np.linalg.norm(k))
 
     def bump_period_cells(self) -> float:
@@ -360,16 +385,17 @@ class TorchBackend:
             radius = max(1, int(round(period / 4)))
         if seed_radius is None:
             seed_radius = max(radius + 1, int(round(period / 2)))
-        n = self.n
         vol = self.current_volume()
-        self.tracker = BumpTracker(n, radius=int(radius), seed_radius=int(seed_radius))
+        self.tracker = BumpTracker(
+            self.n, d=self.d, radius=int(radius), seed_radius=int(seed_radius),
+        )
         return self.tracker.seed(vol, theta_0)
 
     def form_lattice(self, theta_0, settle=3000, min_peakedness=0.0):
         """Reset, run a fixed undriven settle, record peakedness. Does not drive."""
         theta_0 = np.asarray(theta_0, dtype=np.float64).copy()
         self.reset(theta_0, radius=0.05)
-        zero_v = np.zeros(3, dtype=np.float32)
+        zero_v = np.zeros(self.d, dtype=np.float32)
         for _ in range(int(settle)):
             self.step_from_shared_state(torch.mean(self.S, dim=0), zero_v)
         s = torch.mean(self.S, dim=0); m = float(s.mean())
@@ -388,60 +414,71 @@ class TorchBackend:
               on_volume=None) -> np.ndarray:
         """Decode while driving along ``trajectory``. Lattice must already be formed.
 
+        Takes the formed lattice, steps the QAN along trajectory, and returns the decoded bump path.
+
         ``on_volume(t, vol)`` is optional. Called once with ``t=-1`` on the
         latched volume before the first step, then with ``t=0..T-1`` after
         each step. Diagnostic scripts use this; production callers ignore it.
         """
-        theta_0 = trajectory[0, :].copy()
-        self.seed_tracker(theta_0, radius=radius, seed_radius=seed_radius)
+        theta_0 = trajectory[0, :].copy() #walk starting position
+        self.seed_tracker(theta_0, radius=radius, seed_radius=seed_radius) #seed the tracker with the starting position
 
-        n, T = self.n, trajectory.shape[0]
+        #1. Allocate space for the decoded bump path in the 10 next lines:
+        n, d, T = self.n, self.d, trajectory.shape[0]
+        shape = (n,) * d
+        n_frames = (T + display_stride - 1) // display_stride
         if on_volume is not None:
             on_volume(-1, self.current_volume())
 
-        pos = np.empty((T, 3), dtype=np.float64)
+        pos = np.empty((T, d), dtype=np.float64)
         self.display_stride = display_stride
-        self.display_marginals = np.empty(
-            ((T + display_stride - 1) // display_stride, 3, n),
-            dtype=np.float32,
-        )
+        self.display_marginals = np.empty((n_frames, d, n), dtype=np.float32)
         self.snapshot_stride = snapshot_stride
         self.snapshot_times = np.arange(0, T, snapshot_stride)
         n_snap = len(self.snapshot_times)
-        self.snapshots = np.empty((n_snap, n, n, n), dtype=np.float32)
-        self.snapshot_cells = np.empty((n_snap, 3), dtype=np.float64)
+        self.snapshots = np.empty((n_snap, *shape), dtype=np.float32)
+        self.snapshot_cells = np.empty((n_snap, d), dtype=np.float64)
         buf = (torch.empty((T, self.S.shape[1]), dtype=self.torch_dtype, device=self.device)
-               if return_states else None)
+               if return_states else None) #Allocate the 
 
+        #2. each timestep:
         for t in range(T):
-            self.step_from_shared_state(
+            ##one update of the neural activity
+            self.step_from_shared_state( 
                 torch.mean(self.S, dim=0),
                 self.qan.theta_dot_at(trajectory, t),
             )
+            #mean over populations
             S_tot = torch.mean(self.S, dim=0).squeeze()
-            v = S_tot.reshape(n, n, n)
+            v = S_tot.reshape(shape)
             vol = v.detach().cpu().numpy()
 
+            #local com
             pos[t] = self.tracker.advance(vol)
             if on_volume is not None:
                 on_volume(t, vol)
 
-            if t % display_stride == 0:
-                self.display_marginals[t // display_stride] = torch.stack(
-                    [v.sum(dim=(1, 2)), v.sum(dim=(0, 2)), v.sum(dim=(0, 1))]
-                ).detach().cpu().numpy()
-            if t % snapshot_stride == 0:
+            if t % display_stride == 0: #store if display is taken
+                stacked = torch.stack([
+                    v.sum(dim=tuple(j for j in range(d) if j != ax))
+                    for ax in range(d)
+                ])
+                self.display_marginals[t // display_stride] = (
+                    stacked.detach().cpu().numpy()
+                )
+            if t % snapshot_stride == 0: #store if snapshot is taken
                 si = t // snapshot_stride
                 self.snapshots[si] = vol
                 self.snapshot_cells[si] = self.tracker.c_prev
             if buf is not None:
                 buf[t] = S_tot
-
-        self.pos_com_unwrapped = pos
-        out = pos % (2 * np.pi)
+        
+        #3. Return 
+        self.pos_com_unwrapped = pos #unwrapped position of the com
+        out = np.mod(pos, 2 * np.pi) #wrapped position of the com
         if return_states:
             return out, buf.detach().cpu().numpy()
-        return out
+        return out #retunr wrapped position of the com
 
     def simulate(self, trajectory: np.ndarray, settle=3000,
                  return_states=False, radius: int = None,
@@ -481,7 +518,7 @@ class TorchBackend:
 
     def get_states(self):
         """
-        Return current torch states as a NumPy array with shape (6, N, 1).
+        Return current torch states as a NumPy array with shape (n_cans, N, 1).
         """
         return self.S.detach().cpu().numpy()
     

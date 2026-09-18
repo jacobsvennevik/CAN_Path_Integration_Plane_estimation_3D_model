@@ -21,6 +21,11 @@ class Arena3DExperiment(BaseExperiment):
 
     def generate_trajectory(self, turn_std: float = None, n_steps=None, seed=None):
         """Independent 3D reflecting walk. n_steps and seed default to config.
+
+        Random walk in physical 3D space.
+        Returns world_pos (sequence of positions), velocity_body_seq (sequence of speeds),
+        torus_gt (sequence of positions on the torus manifold).
+        Basicly turns the physical wlak in the box into ground truth for the torus manifold.
         """
         cfg   = self.config.experiment
         n_steps = cfg.n_steps if n_steps is None else int(n_steps)
@@ -55,6 +60,9 @@ class Arena3DExperiment(BaseExperiment):
 
         # NOTE: z is treated as periodic here like x and y. If the lattice ends up
         # columnar rather than isotropic, this ground truth is wrong on that axis.
-        return world_pos, v_body_seq, world_to_torus_gt(world_pos, scale)
+        d = self.qan.manifold.dim
+        return world_pos, v_body_seq, world_to_torus_gt(
+            world_pos[:, :d],#keep as many axis as the the manifold has
+            scale)
     
     

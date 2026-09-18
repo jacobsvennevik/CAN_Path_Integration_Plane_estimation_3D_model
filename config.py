@@ -6,19 +6,20 @@ class NetworkConfig:
     """
     Sets up the network for the experiment: Network + Movement + Integration also a flag realted to memory
     """
-    spacing:            float = 2.0 * np.pi / 64  # 64 cells/axis (2^6); sheet size is 2π/spacing
+    spacing:            float = 0.1  # the spacing of neurons on the manifold
+    dim:                int   = 2  # T^d the dimension of the torus manifold
     lambda_net:         float = 1.0  # ~10.2 cells/period at n=64; 0.6932 would be 7.1 and fail the cells/period gate
     ratio:              float = 1.05  # B&F gamma/beta
-    alpha:              float = 0.15  # loop gain ~1.7 at this lambda and n
+    alpha:              float = 0.15  # kernel scaling factor
     
     #movement of the bump
     b:                  float = 1.0 #Positive global exitasion to the whole network
-    offset_magnitude:   float = 0.073 # ~9% of the 0.785 rad lattice period; 0.067–0.078 window
+    offset_magnitude:   float = 0.073 # How much the neron sheet is shifted
 
     #integration
     dt:                 float = 0.25 #forward-Euler step size, same units as tau
     tau:                float = 5.0  # neural time constant; dt/tau ≤ 0.125 at tau=2
-    velocity_gain:      float = 5.0 # b * tau seed (tau=5); fit_gain refines
+    velocity_gain:      float = 5.0 # fit_gai refines
     
     #flag related to building dense numoy matricies or skipping that
     build_connectivity: bool  = False
@@ -33,7 +34,7 @@ class ExperimentConfig:
     kappa:            float = 10.0 #Bingham filter measurement strength:
     rho:              float = 0.999  # Bingham concentration decay ρ (not the Optuna drive composite θ̇τ/δ)
     grid_spacing:     float = 0.48    # metres per full 2π wrap = the torus period
-    target_speed_rad_per_time: float = 0.002  # desired bump speed, rad per unit TIME (not per step)
+    target_speed_rad_per_time: float = 0.002  # desired bump speed
     # Heading diffusion. Units rad · time^{-1/2}, not rad/time.
     # Per-step Gaussian is omega_std * sqrt(dt) so heading variance grows in time, not steps.
     # Correlation time τ_h = 2 / ω² = 2222 time units at 0.03 (≈ 8900 steps at dt=0.25).
@@ -74,11 +75,6 @@ def world_to_normalized(world_pos, env_size):
 def world_to_flat_bins(world_pos, env_size, bins, ndim=2):
     """Answers which flat bin does each position fall in.
 
-    The rate-map accumulator is a flat array of length bins**ndim, so each
-    position has to collapse to a single integer. Bin numbers along each axis are
-    combined as digits in base `bins`: a 3-D position in bins (i, j, k) maps to
-    i*bins**2 + j*bins + k. That is NumPy's own row-major order, so
-    reshape((bins,) * ndim) at the end puts every count in the right cell.
 
     Only the leading `ndim` columns are used, which is how the 2-D arena drops z
     from its (T, 3) positions.

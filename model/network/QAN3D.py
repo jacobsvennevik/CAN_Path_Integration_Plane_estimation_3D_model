@@ -10,8 +10,8 @@ import numpy as np
 @dataclass(kw_only=True)
 class Torus3DQAN(QAN):
     """
-    QAN for a 3-torus manifold.
-    Uses 6 offset CAN3Ds.
+    QAN for a 3-torus manifold (generalizes to T^dimensions.
+    Uses 6 offset CAN3Ds at d=3, 4 at d=2.
     All three angular dimensions are periodic in [0, 2π].
     Inherits behavior from MADE QAN.
 
@@ -22,9 +22,7 @@ class Torus3DQAN(QAN):
 
     Constructing directly works too, it just means naming every parameter.
     """
-    manifold: AbstractManifold = field(
-        default_factory=torus3D_manifold.Torus3D
-    )
+    manifold: AbstractManifold = field(default=None)
     # --- kernel ---
     spacing:            float   # radians between neighboring neurons on the torus (resolution)
     lambda_net:         float   # kernel width
@@ -44,7 +42,9 @@ class Torus3DQAN(QAN):
     @classmethod
     def from_config(cls, cfg):
         """Build from a NetworkConfig. The one intended entry point."""
-        return cls(spacing=cfg.spacing, lambda_net=cfg.lambda_net,
+        dim = int(getattr(cfg, "dim", 3))
+        return cls(manifold=torus3D_manifold.TorusND(dim=dim),
+                   spacing=cfg.spacing, lambda_net=cfg.lambda_net,
                    ratio=cfg.ratio, b=cfg.b, offset_magnitude=cfg.offset_magnitude,
                    alpha=cfg.alpha,
                    dt=cfg.dt, tau=cfg.tau,
@@ -53,6 +53,8 @@ class Torus3DQAN(QAN):
 
     def __post_init__(self):
         """Build one DoG kernel at the configured gain and inject it."""
+        if self.manifold is None:
+            self.manifold = torus3D_manifold.TorusND(dim=3)
         self.kernel = Kernel_BF(lambda_net=self.lambda_net, ratio=self.ratio, alpha=self.alpha)
 
         # can_dims[i] is the axis CAN i listens to, can_signs[i] its direction.
@@ -87,7 +89,7 @@ class Torus3DQAN(QAN):
         return theta
 
     def make_trajectory(self, n_steps: int = 1000, speed: float = None) -> np.ndarray:
-        """Test path with incommensurate rates so the trajectory densely covers T³.
+        """Test path with incommensurate rates so the trajectory densely covers T^d.
 
         ``speed`` is radians per unit TIME; each Euler step advances by
         ``speed * dt``. Default preserves the old per-step increment of
@@ -96,10 +98,11 @@ class Torus3DQAN(QAN):
         if speed is None:
             speed = (0.005 / np.sqrt(3)) / self.dt
         t = np.linspace(0, speed * self.dt * n_steps, n_steps)
-        traj = np.zeros((n_steps, self.manifold.dim))
-        traj[:, 0] = np.mod(t, 2 * np.pi)
-        traj[:, 1] = np.mod(np.sqrt(2)*t, 2 * np.pi)
-        traj[:, 2] = np.mod(np.sqrt(3)*t, 2 * np.pi)# third incommensurate freq
+        d = self.manifold.dim
+        traj = np.zeros((n_steps, d))
+        rates = np.sqrt(np.array([1, 2, 3, 5, 7, 11], float)[:d])  # incommensurate freqs; third is sqrt(3)
+        for j in range(d):
+            traj[:, j] = np.mod(rates[j] * t, 2 * np.pi)  # wrap each axis onto [0, 2π]
         return traj
 
     def compute_theta_dot(
