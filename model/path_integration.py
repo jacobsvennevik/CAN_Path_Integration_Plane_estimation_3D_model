@@ -38,39 +38,47 @@ def build_rotation_matrix(n_hat: np.ndarray, g: np.ndarray) -> np.ndarray:
     ])
     return np.eye(3) + vx + vx @ vx * (1.0 / (1.0 + c))
 
-def pi_star(v_alloc: np.ndarray) -> np.ndarray:
+def pi_star(v_alloc: np.ndarray, dim: int = None) -> np.ndarray:
     """
     Applies the pushforward π★ (differential of π) to an allocentric velocity vector.
-    It is the indetity matrix so a trivial computasion,
-    in our case but kept for consistency vis a vi the MADE framework (Claudi et, al. 2025)
+    After R maps n̂ to ẑ the torus axes are the leading coordinates, so T^d
+    keeps the first `dim` components. Identity when dim is None or matches v.
     """
-    return np.asarray(v_alloc, dtype=float)
+    v = np.asarray(v_alloc, dtype=float)
+    return v if dim is None else v[:int(dim)]
+    #NOTE: I think it is possibly just a placeholder we will be changing it
+# vMF process-noise concentration (Kurz κ_w). High = slow forgetting.
+# ExperimentConfig.rho = 0.999 is the old Bingham decay; A_d(0.999) ≈ 0.3
+# and would collapse the posterior to κ < 1 every predict.
+KAPPA_W_DEFAULT = 100.0
 
-def step_filter(current, displacement, kappa, rho):
+
+def step_filter(current, displacement, kappa, kappa_w=KAPPA_W_DEFAULT):
     """Single predict and update cycle."""
-    predicted = predict(current, rho)
+    predicted = predict(current, kappa_w)
     return update(predicted, displacement, kappa)
 
 
 class PathIntegrator:
     """
-    Path integrator coupling the Bingham plane filter with the
-    T³ QAN.
+    Path integrator coupling the vMF plane filter with the T^d QAN.
     """
     def __init__(self, qan, kappa=10.0, rho=0.999, scale=1.0, 
                  initial_estimate=None, record_stride=10,
                  plane_mode="bayesian", true_n_hat = None,
-                 decode_chunk=4096, decode_radius=4, decode_seed_radius=None):
+                 decode_chunk=4096, decode_radius=4, decode_seed_radius=None,
+                 kappa_w=KAPPA_W_DEFAULT):
         self.qan = qan 
-        self.kappa = kappa #likelihood consentration for the Bingham update.
-        self.rho = rho # Bingham concentration decay ρ
+        self.kappa = kappa # likelihood concentration for the vMF update
+        self.rho = rho     # leftover prob distrinution decay
+        self.kappa_w = float(kappa_w)  # process-noise concentration for predict()
         self.scale = scale
         self.backend = TorchBackend(qan) 
-        self._bingham_state = initial_estimate or uniform_prior() #starting belief for n̂
+        self._vmf_state = initial_estimate or uniform_prior() #starting belief for n̂
         self._theta = np.zeros(qan.manifold.dim) #decoded position
         self._theta_0 = np.zeros(qan.manifold.dim) #where the bump was seeded
         self._n_hat_corrected = None  # gravity-disambiguated, stored on self
-        self.plane_mode = plane_mode #whether to use the true plane mode or the Bingham mode
+        self.plane_mode = plane_mode #whether to use the true plane mode or the vMF mode
         if true_n_hat is None:
             true_n_hat = np.array([0.0, 0.0, 1.0])      # gravity / flat floor
         true_n_hat = np.asarray(true_n_hat, dtype=float)
@@ -92,7 +100,7 @@ class PathIntegrator:
         # Optional recording buffers
         # S_tot_buffer: stays on-device (no per-step CPU transfer)
         self.S_tot_buffer      = None 
-        self.bingham_snapshots = None
+        self.vmf_snapshots = None
         self.record_stride = record_stride #run() records the state every Nth step
         self.ratemap_sums   = None   # set by run(..., ratemap_bins=N) when > 0
         self.ratemap_counts = None   
@@ -108,7 +116,7 @@ class PathIntegrator:
         zero_v = np.zeros(self.qan.manifold.dim)
         for _ in range(n_steps):
             self.backend.step(zero_v)
-            self._bingham_state = predict(self._bingham_state, self.rho)
+            self._vmf_state = predict(self._vmf_state, self.kappa_w)
         self._theta = self._seed_tracker()
 
     def _seed_tracker(self) -> np.ndarray:
@@ -125,15 +133,16 @@ class PathIntegrator:
         if d_norm > 1e-9:
             #we only want direction, not magnitude
             v_body_t_unit = v_body / d_norm
-            # run the bingham filter
-            self._bingham_state = step_filter(self._bingham_state, v_body_t_unit, self.kappa, self.rho)
+            # run the vMF filter
+            self._vmf_state = step_filter(
+                self._vmf_state, v_body_t_unit, self.kappa, self.kappa_w)
 
         #plane mode either bayesian or true plane mode
         if self.plane_mode == "true":
             n_hat = self._true_n_hat
         else:
-            # Bayesian: extract MAP estimate, disambiguate sign with gravity
-            n_hat = self._bingham_state.M[:, -1]
+            # Bayesian: NOTE: possibky a placeholder
+            n_hat = np.asarray(self._vmf_state.mu, dtype=float).copy()
             if np.dot(n_hat, g_hat) > 0:
                 n_hat = -n_hat
             
@@ -146,7 +155,9 @@ class PathIntegrator:
         target_speed_rad = v_alloc * self.scale  # rad/step (history key; not the backend unit)
 
         # backend.step expects rad per unit TIME (theta_dot_at's convention)
-        self.backend.step(target_speed_rad / self.qan.dt)
+        # and one component per torus axis (π star after R maps n̂ -> ẑ)
+        drive = pi_star(target_speed_rad, self.qan.manifold.dim) / self.qan.dt
+        self.backend.step(drive)
         return n_hat, v_alloc, target_speed_rad
 
     def step(self, v_body: np.ndarray, g: np.ndarray) -> np.ndarray:
@@ -162,8 +173,8 @@ class PathIntegrator:
 
         # Record into history
         self.history["n_hat"].append(n_hat.copy())
-        self.history["z1"].append(self._bingham_state.z1)
-        self.history["z2"].append(self._bingham_state.z2)
+        self.history["z1"].append(0.0)
+        self.history["z2"].append(float(self._vmf_state.kappa))
         self.history["v_body"].append(v_body.copy())
         self.history["v_alloc"].append(v_alloc.copy())
         self.history["target_speed_rad"].append(target_speed_rad .copy())
@@ -207,10 +218,10 @@ class PathIntegrator:
 
         if record:
             _buf  = self.backend.allocate_state_buffer(T, stride=self.record_stride)
-            _bing = []
+            _vmf = []
         else:
             _buf  = None
-            _bing = None
+            _vmf = None
         
                 # neuron subsample → torch index tensor
         sub_t = (torch.tensor(sub_idx, dtype=torch.long, device=self.backend.device)
@@ -241,8 +252,8 @@ class PathIntegrator:
 
             # write history straight into the arrays
             _h_n_hat[t]   = n_hat
-            _h_z1[t]      = self._bingham_state.z1
-            _h_z2[t]      = self._bingham_state.z2
+            _h_z1[t]      = 0.0
+            _h_z2[t]      = float(self._vmf_state.kappa)
             _h_v_body[t]  = v_body
             _h_v_alloc[t] = v_alloc
             _h_tsr[t]     = target_speed_rad
@@ -253,7 +264,7 @@ class PathIntegrator:
                 self.backend.record_shuffle_ratemap(_shuf, flat_indices, t, lags, sub_t)
             if record and (t % self.record_stride== 0):
                 self.backend.record_state_to_buffer(_buf, t, stride=self.record_stride)
-                _bing.append(copy.deepcopy(self._bingham_state))
+                _vmf.append(copy.deepcopy(self._vmf_state))
 
             # chunk full (or last step) -> decode it all at once and dump to CPU.
             # The tracker keeps its state between calls, so chunks join up.
@@ -275,10 +286,10 @@ class PathIntegrator:
 
         if record:
             self.S_tot_buffer      = self.backend.buffer_to_numpy(_buf)
-            self.bingham_snapshots = _bing
+            self.vmf_snapshots = _vmf
         else:
             self.S_tot_buffer      = None
-            self.bingham_snapshots = None
+            self.vmf_snapshots = None
         
         if _acc is not None:
             self.ratemap_sums, self.ratemap_counts = \
@@ -304,11 +315,12 @@ class PathIntegrator:
 
     def concentration_eigenvalue_gap(self) -> float:
         """
-        Diagnostics for uncertinity of the filter.
+        Diagnostics for uncertainty of the filter.
         Large gap, filter is confident.
-        Small gap, still uncertain between two candidate axes.
+        Small gap, filter is uncertain.
+        e = confident, small = still uncertain.
         """
-        return self._bingham_state.z2 - self._bingham_state.z1
+        return float(self._vmf_state.kappa)
 
     def reset(self, theta_0: np.ndarray, initial_estimate: Optional[VonMisesFisherDistribution] = None):
         """
@@ -316,9 +328,9 @@ class PathIntegrator:
         For running multiple trials with the same QAN hyperparameters.
         """
         if initial_estimate is None:
-            self._bingham_state = uniform_prior()
+            self._vmf_state = uniform_prior()
         else:
-            self._bingham_state = initial_estimate
+            self._vmf_state = initial_estimate
 
         self.backend.reset(theta_0)
         self._theta_0 = np.asarray(theta_0, dtype=np.float64).copy()
@@ -330,4 +342,4 @@ class PathIntegrator:
             self.history[key] = []
         
         self.S_tot_buffer      = None
-        self.bingham_snapshots = None
+        self.vmf_snapshots = None

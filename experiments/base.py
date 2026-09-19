@@ -33,7 +33,7 @@ class ExperimentResult:
     n_hat_hist:        np.ndarray
     gap_hist:          np.ndarray
     S_tot_buffer:      np.ndarray   # or None
-    bingham_snapshots: list         # or None
+    vmf_snapshots: list         # or None
     norm_error:        np.ndarray
     mean_norm_error:   float
     condition:         str
@@ -59,7 +59,7 @@ class BaseExperiment:
         decode_chunk = max(64, int(256e6 / (4 * N_neurons)))
         self.integrator_kwargs = dict(
             kappa=config.experiment.kappa,
-            rho=config.experiment.rho,   # Bingham concentration decay ρ, not kernel alpha
+            rho=config.experiment.rho,   # leftover Bingham decay; PathIntegrator uses kappa_w
             scale=config.experiment.scale,
             plane_mode=plane_mode,                   # "bayesian" (default) or "true"
             decode_chunk=decode_chunk,
@@ -154,7 +154,7 @@ class BaseExperiment:
             n_hat_hist=n_hat_hist,
             gap_hist=gap,
             S_tot_buffer=integrator.S_tot_buffer,
-            bingham_snapshots=integrator.bingham_snapshots,
+            vmf_snapshots=integrator.vmf_snapshots,
             norm_error=norm_error,
             mean_norm_error=float(norm_error[1:].mean()),
             condition="",
@@ -189,9 +189,9 @@ class BaseExperiment:
             json.dump({"condition": result.condition, "params": result.params},
                       f, indent=2)
 
-        if result.bingham_snapshots is not None:
-            with open(path.replace(".npz", "_bingham.pkl"), "wb") as f:
-                pickle.dump(result.bingham_snapshots, f)
+        if result.vmf_snapshots is not None:
+            with open(path.replace(".npz", "_vmf.pkl"), "wb") as f:
+                pickle.dump(result.vmf_snapshots, f)
 
     @staticmethod
     def _made_metric(decoded, ground_truth, world_pos=None):

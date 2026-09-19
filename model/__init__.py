@@ -4,7 +4,7 @@ Three parts, in dependency order:
 
   network/            the T3 lattice -- kernel, connectivity, the six
                       velocity-driven CANs, the FFT recurrence, bump decoding
-  plane_estimation    the recursive Bingham filter on S2
+  plane_estimation    the recursive vMF filter on S2
   path_integration    the only module importing both: filter -> n_hat -> rotate
                       velocity -> drive the network -> decode
 

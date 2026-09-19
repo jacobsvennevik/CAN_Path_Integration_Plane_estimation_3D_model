@@ -391,6 +391,15 @@ class TorchBackend:
         )
         return self.tracker.seed(vol, theta_0)
 
+    def track_step(self) -> np.ndarray:
+        """Advance the bump tracker by one frame of the current volume."""
+        return self.tracker.advance(self.current_volume())
+
+    def track_batch(self, S_chunk: torch.Tensor) -> np.ndarray:
+        """Decode a (T, N) activity chunk; tracker state carries across frames."""
+        vols = S_chunk.detach().cpu().numpy().reshape((-1,) + self.shape)
+        return self.tracker.advance_frames(vols)
+
     def form_lattice(self, theta_0, settle=3000, min_peakedness=0.0):
         """Reset, run a fixed undriven settle, record peakedness. Does not drive."""
         theta_0 = np.asarray(theta_0, dtype=np.float64).copy()
