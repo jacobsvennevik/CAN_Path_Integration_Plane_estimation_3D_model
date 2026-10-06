@@ -1,22 +1,28 @@
+from dataclasses import dataclass
+
 import numpy as np
 from config import ExperimentConfig
-from experiments.base import BaseExperiment, world_to_torus_gt
+from experiments.base import BaseExperiment, Trajectory, world_to_torus_gt
 
+
+@dataclass
 class Arena3DConfig(ExperimentConfig):
+    ratemap_ndim: int = 3
+    ratemap_n_sub: int = 300
+    ratemap_n_shuffle: int = 20
+
     @property
     def run_name(self) -> str:
-        return f"arena3d_T{self.n_steps}_kap{self.kappa}_seed{self.seed}_envSize{self.env_size:}_gridSpacing{self.grid_spacing}"
-    
-    
+        return f"arena3d_T{self.n_steps}_seed{self.seed}_envSize{self.env_size:}_gridSpacing{self.grid_spacing}"
+
+
 class Arena3DExperiment(BaseExperiment):
     condition_label = "arena_3d"
-    ratemap_ndim      = 3
-    ratemap_n_sub     = 300
-    ratemap_n_shuffle = 20
-    
-    def __init__(self, config, record=True, plane_mode="true"):
-        super().__init__(config, record)                  # QAN + integrator_kwargs from Arena2D
-        self.integrator_kwargs["plane_mode"] = plane_mode  # flip the filter on/off
+
+    def __init__(self, config, record=None, plane_mode=None):
+        assert config.experiment.ratemap_ndim == 3
+        super().__init__(config, record=record, plane_mode=plane_mode)
+        # plane_mode: flip the filter on/off when given; otherwise PlaneConfig.plane_mode
         
 
     def generate_trajectory(self, turn_std: float = None, n_steps=None, seed=None):
@@ -27,42 +33,36 @@ class Arena3DExperiment(BaseExperiment):
         torus_gt (sequence of positions on the torus manifold).
         Basicly turns the physical wlak in the box into ground truth for the torus manifold.
         """
-        cfg   = self.config.experiment
-        n_steps = cfg.n_steps if n_steps is None else int(n_steps)
-        seed = cfg.seed if seed is None else int(seed)
-        rng   = np.random.default_rng(seed)
-        scale = cfg.scale
-        limit = cfg.env_size / 2
-        dt = self.config.network.dt
-        torus_inc = cfg.target_speed_rad_per_time * dt   # rad/step
-        world_speed = torus_inc / cfg.scale              # m/step
-        omega_std = cfg.omega_std if turn_std is None else float(turn_std)
-        step_turn_std = omega_std * np.sqrt(dt)
+        w = self._walk_params(turn_std, n_steps, seed)
+
+        world_pos  = np.zeros((w.n_steps, 3))
+        v_body_seq = np.zeros((w.n_steps, 3))
  
-        world_pos  = np.zeros((n_steps, 3))
-        v_body_seq = np.zeros((n_steps, 3))
- 
-        direction = rng.normal(size=3)
+        direction = w.rng.normal(size=3)
         direction /= np.linalg.norm(direction)            # random initial unit heading
  
-        for t in range(1, n_steps):
-            direction = direction + rng.normal(0, step_turn_std, size=3)
+        for t in range(1, w.n_steps):
+            direction = direction + w.rng.normal(0, w.step_turn_std, size=3)
             direction /= np.linalg.norm(direction)        # diffuse heading on the sphere
-            v = world_speed * direction
+            v = w.world_speed * direction
             new_pos = world_pos[t - 1] + v
             for dim in range(3):                          # reflect in x, y AND z
-                if new_pos[dim] > limit or new_pos[dim] < -limit:
+                if new_pos[dim] > w.limit or new_pos[dim] < -w.limit:
                     direction[dim] = -direction[dim]      # specular bounce
-                    v = world_speed * direction
+                    v = w.world_speed * direction
                     new_pos = world_pos[t - 1] + v
             world_pos[t]  = new_pos
             v_body_seq[t] = v
 
-        # NOTE: z is treated as periodic here like x and y. If the lattice ends up
-        # columnar rather than isotropic, this ground truth is wrong on that axis.
         d = self.qan.manifold.dim
-        return world_pos, v_body_seq, world_to_torus_gt(
-            world_pos[:, :d],#keep as many axis as the the manifold has
-            scale)
+        n_true = np.broadcast_to(np.array([0.0, 0.0, 1.0]), (w.n_steps, 3))
+        return Trajectory(
+            world_pos=world_pos,
+            v_body_seq=v_body_seq,
+            torus_gt=world_to_torus_gt(
+                world_pos[:, :d],#keep as many axis as the the manifold has
+                w.scale),
+            n_true_seq=n_true,
+        )
     
     

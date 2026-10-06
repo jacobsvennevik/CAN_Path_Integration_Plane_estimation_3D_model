@@ -1,6 +1,5 @@
 import numpy as np
 from scipy.special import iv, ive
-import matplotlib.pyplot as plt
 
 """
 Recursive von Mises-Fisher filter on S^2, following Kurz et al. (2016),
@@ -133,7 +132,7 @@ def update(prediction, measurement, kappa_v):
     return VonMisesFisherDistribution(mu, kappa)
 
 
-def run_vmf_filter(initial_estimate, measurements, kappa_v, kappa_w=100.0):
+def run_vmf_filter(initial_estimate, measurements, kappa_v, kappa_w=1e4):
     """Runs the recursive (bayesian) vMF filter.
     
     Predict then update, repeat. 
@@ -154,6 +153,24 @@ def uniform_prior():
     return VonMisesFisherDistribution(np.array([0.0, 0.0, 1.0]), 0.0)
 
 
+def sample_vmf(mu, kappa, rng):
+    """One draw from vMF(mu, kappa) on S^2 (closed-form inverse CDF of the polar cosine)."""
+    from model.path_integration import build_rotation_matrix
+    mu = np.asarray(mu, dtype=float) 
+    mu = mu / np.linalg.norm(mu) #make mu a unit vector
+    kappa = float(kappa) #kappa is the concentration parameter
+    u = float(rng.random()) #uniform random number between 0 and 1
+    phi = 2.0 * np.pi * float(rng.random()) #direction aorund mu
+    if kappa < 1e-12: #catch to not divide by zero
+        w = 2.0 * u - 1.0 
+    else:
+        #calculates how far off is this noisy normal from the true one
+        # w says how much of the sample points along μ,
+        w = 1.0 + np.log(u + (1.0 - u) * np.exp(-2.0 * kappa)) / kappa 
+    s = np.sqrt(max(1.0 - w * w, 0.0)) # the sideways part of the sample points
+    return build_rotation_matrix(mu).T @ np.array([s * np.cos(phi), s * np.sin(phi), w]) #builds the vector and then rotates it to face μ.
+
+
 def init_from_normal_guess(n_hat_guess, kappa=0.1):
     """
     Weak prior centered on the guessed plane normal.
@@ -167,21 +184,27 @@ def angular_error_s2(est_mode, n_true):
     return np.rad2deg(np.arccos(dot))
 
 
-def vmf_pdf_on_sphere(estimate, n_points=100):
+def held_normal_stats(n_held, n_true, refresh_mask):
+    """Gives the RMS angular error, mean angular rate, refresh count, error time-course.
+    how wrong was the normal the network actually used, and how much did that normal move around.
     """
-    Visualisation helper
-    """
-    theta = np.linspace(0, np.pi, n_points)
-    phi = np.linspace(0, 2 * np.pi, n_points)
-    T, P = np.meshgrid(theta, phi)
-
-    X = np.sin(T) * np.cos(P)
-    Y = np.sin(T) * np.sin(P)
-    Z = np.cos(T)
-
-    pts = np.stack([X, Y, Z], axis=-1)
-    PDF = c_d(estimate.kappa) * np.exp(estimate.kappa * (pts @ estimate.mu))
-
-    return X, Y, Z, PDF
+    n_held = np.asarray(n_held, dtype=float)
+    n_true = np.asarray(n_true, dtype=float)
+    dots = np.einsum("ij,ij->i", n_held, n_true) #takes, at each time step, the dot product of the held and true normal.
+    err_deg = np.rad2deg(np.arccos(np.clip(dots, -1.0, 1.0))) #converts the error of the held normal at each step in degrees.
+    
+    #compares each step with the one before it to get the angular rate
+    if len(n_held) > 1:
+        dots_h = np.einsum("ij,ij->i", n_held[1:], n_held[:-1])
+        rate = np.rad2deg(np.arccos(np.clip(dots_h, -1.0, 1.0)))
+        mean_rate = float(np.mean(rate))
+    else:
+        mean_rate = 0.0
+    return dict(
+        rms_err_deg=float(np.sqrt(np.mean(err_deg ** 2))),
+        mean_rate_deg=mean_rate,
+        refresh_count=int(np.asarray(refresh_mask).astype(bool).sum()),
+        err_deg=err_deg,
+    )
 
 

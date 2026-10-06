@@ -9,7 +9,7 @@ This module provides functions to visualize:
 3. QAN trajectories and states
 """
 from made.visuals import clean_axes
-from model.metrics import wrapped_angle_diff
+from model.metrics import wrapped_angle_diff, unwrap_torus
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -548,16 +548,6 @@ def _plot_marginals(coords, title, color="black", alpha=0.5, s=10):
     return fig, axes
 
 
-def _unwrap_torus(theta):
-    """
-    Undo the mod-2pi wrapping of a (T, 3) torus trajectory.
-    """
-    theta = np.asarray(theta, dtype=float)
-    steps = wrapped_angle_diff(theta[1:], theta[:-1])
-    zero = np.zeros((1, theta.shape[1]))
-    return theta[0] + np.vstack([zero, np.cumsum(steps, axis=0)])
- 
- 
 def plot_trajectory_vs_decoded(traj, decoded, title="Path integration per axis"):
     """
     One panel per torus axis: unwrapped phase against time, ground truth vs decoded.
@@ -566,7 +556,7 @@ def plot_trajectory_vs_decoded(traj, decoded, title="Path integration per axis")
     #normalise both
     traj, decoded = np.asarray(traj, float), np.asarray(decoded, float)
     #unwrap both
-    gt_u, dec_u = _unwrap_torus(traj), _unwrap_torus(decoded)
+    gt_u, dec_u = unwrap_torus(traj), unwrap_torus(decoded)
     #calculate the step difference
     gt_step = wrapped_angle_diff(traj[1:], traj[:-1])
     dec_step = wrapped_angle_diff(decoded[1:], decoded[:-1])

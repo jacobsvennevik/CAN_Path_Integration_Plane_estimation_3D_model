@@ -1,63 +1,48 @@
+from dataclasses import dataclass
+
 import numpy as np
 from config import ExperimentConfig
-from experiments.base import BaseExperiment, world_to_torus_gt
+from experiments.base import (
+    BaseExperiment, Trajectory, planar_walk, world_to_torus_gt,
+)
 
+
+@dataclass
 class Arena2DConfig(ExperimentConfig):
+    ratemap_n_sub: int = 300
+    ratemap_n_shuffle: int = 50
+
     @property
     def run_name(self) -> str:
-        return f"arena2d_T{self.n_steps}_kap{self.kappa}_seed{self.seed}_envSize{self.env_size:}_gridSpacing{self.grid_spacing}"
-    
+        return f"arena2d_T{self.n_steps}_seed{self.seed}_envSize{self.env_size:}_gridSpacing{self.grid_spacing}"
+
 
 class Arena2DExperiment(BaseExperiment):
 
     condition_label = "arena_2d"
-    ratemap_ndim          = 2        
-    ratemap_n_sub         = 300      # blind random draw from the full N
-    ratemap_seed          = 0        # independent of cfg.seed; for reproducible subsample
-    ratemap_n_shuffle     = 50       # <-- ADD: enables circular-shift Z (sinfo_z/sidx_z)
-    ratemap_active_thresh = 1e-3     # inherited default, restated for visibility
-        
+
     def generate_trajectory(self, turn_std: float = None, n_steps=None, seed=None):
         """
         Random walk in physical 2D space.
-        Returns world_pos (sequence of positions), velocity_body_seq (sequence of speeds), 
+        Returns world_pos (sequence of positions), velocity_body_seq (sequence of speeds),
         torus_gt (sequence of positions on the torus manifold).
         Basicly turns the physical wlak in the box into ground truth for the torus manifold.
+
+        Flat-floor walk: walk computed in 2-D plane then embeeded with basis E into 3-D space.
         """
-        cfg   = self.config.experiment
-        n_steps = cfg.n_steps if n_steps is None else int(n_steps)
-        seed = cfg.seed if seed is None else int(seed)
-        rng   = np.random.default_rng(seed)
-        scale = cfg.scale
-        dt = self.config.network.dt
-        torus_inc = cfg.target_speed_rad_per_time * dt   # rad/step
-        world_speed = torus_inc / cfg.scale              # m/step
-        omega_std = cfg.omega_std if turn_std is None else float(turn_std)
-        step_turn_std = omega_std * np.sqrt(dt)
-
-
-        #Pre-allocate two arrays of zeroes in 3-dimensions
-        world_pos  = np.zeros((n_steps, 3))
-        v_body_seq = np.zeros((n_steps, 3))
-        #persistent random walk
-        heading = rng.uniform(0, 2 * np.pi) #random heading
-        # Reflect at boundaries ±(env_size/2)
-        limit = cfg.env_size / 2
-        for t in range(1, n_steps):
-            heading += rng.normal(0, step_turn_std)     # Wiener heading: ω_std √dt
-            v = world_speed * np.array([np.cos(heading), np.sin(heading), 0.0]) #velocity heading at constant speed
-            #update world positon
-            new_pos = world_pos[t - 1] + v
-            for dim in range(2):  # only x, y for 2D arena
-                if new_pos[dim] > limit or new_pos[dim] < -limit:
-                    heading = np.pi - heading if dim == 0 else -heading  # reflect
-                    v = world_speed * np.array([np.cos(heading), np.sin(heading), 0.0]) #Recompute the velocity vector using the reflected heading
-                    new_pos = world_pos[t - 1] + v 
-            world_pos[t] = new_pos
-            v_body_seq[t] = v
+        w = self._walk_params(turn_std, n_steps, seed)
+        uv, duv = planar_walk(w.rng, w.n_steps, w.world_speed, w.step_turn_std, w.limit)
+        E = np.eye(3)[:, :2]
+        world_pos = uv @ E.T
+        v_body_seq = duv @ E.T
 
         d = self.qan.manifold.dim
-        return world_pos, v_body_seq, world_to_torus_gt(
-            world_pos[:, :d], #keep as many axis as the the manifold has
-            scale)
-    
+        n_true = np.broadcast_to(np.array([0.0, 0.0, 1.0]), (w.n_steps, 3))
+        return Trajectory(
+            world_pos=world_pos,
+            v_body_seq=v_body_seq,
+            torus_gt=world_to_torus_gt(
+                world_pos[:, :d], #keep as many axis as the the manifold has
+                w.scale),
+            n_true_seq=n_true,
+        )

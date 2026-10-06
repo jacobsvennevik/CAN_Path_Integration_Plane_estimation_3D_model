@@ -5,18 +5,11 @@ Gong & Yu's scoring logic, pasted almost verbatum to keep consistency.
 
 import numpy as np
 from scipy.stats import pearsonr
-from scipy.ndimage import gaussian_filter, rotate
-from scipy.signal import correlate, find_peaks
+from scipy.ndimage import rotate
+from scipy.signal import find_peaks
 from scipy.interpolate import RegularGridInterpolator
 from sklearn.cluster import MeanShift
 
-CHI_AZIMUTHS_DEG  = np.arange(22, 360, 30)        # 12 azimuths actually sampled
-CHI_ALTITUDES_DEG = (72, 56)                       # (hexagonal-plane, square-plane)
-CHI_TEMPLATE = {                                   # (hgs azimuth-idx, sgs azimuth-idx)
-    "fcc": ([3, 7, 11], [1, 5, 9]),
-    "hcp": ([1, 5, 9], [3, 7, 11]),
-    "col": ([0, 2, 4, 6, 8, 10], [0, 2, 4, 6, 8, 10]),
-}
 RADIAL_FRACTION = 0.3                              # ring search radius = int(d * frac)
 
 
@@ -51,68 +44,6 @@ def oblique_slice(ac, azimuth, altitude, bins=51):
 
     return np.nan_to_num(ac_interpolator(plane)).reshape(bins, bins, -1)
 
-
-def autocorr(f, th):
-    ''' Standardized autocorrelation
-    '''
-    if len(f.shape) == 3:
-        f = f[..., None]
-    n = np.prod(f.shape[:-1])
-    f_ = (f - f.mean(axis=(0, 1, 2))) / f.std(axis=(0, 1, 2))
-
-    acs = []
-    for i in range(f.shape[-1]):
-        ac = correlate(f_[..., i], f_[..., i], mode='full') / n
-        ac[ac < th] = 0
-        acs.append(ac)
-    return np.stack(acs, axis=-1)
-
-def rate_map(x, aang, precision=25, reshape=False):
-    ''' Generate 3d histogram for firing rates
-    '''
-    d = x.shape[-1]
-    xrange = np.linspace(-1, 1, precision, endpoint=True)
-    n, n_neurons = len(xrange) - 1, aang.shape[-1]
-    r = np.zeros((n, n, n, n_neurons)) if d == 3 else np.zeros((n, n, n_neurons))
-    for i0 in range(n):
-        regionx = (x[:, 0] > xrange[i0]) & (x[:, 0] <= xrange[i0+1])
-        for i1 in range(n):
-            regiony = (x[:, 1] > xrange[i1]) & (x[:, 1] <= xrange[i1+1])
-            regionxy = regionx & regiony
-            if d == 3:
-                for i2 in range(n):
-                    regionz = (x[:, 2] > xrange[i2]) & (x[:, 2] <= xrange[i2+1])
-                    region = regionxy & regionz
-                    if np.any(region):
-                        r[i0, i1, i2] = aang[region].mean(axis=0)
-            elif np.any(region): # 2D
-                r[i0, i1] = aang[region].mean(axis=0)
-
-    xs = (xrange[1:] + xrange[:-1]) / 2
-    xs = np.meshgrid(xs, xs, xs, indexing='ij') if d == 3 else np.meshgrid(xs, xs, indexing='ij')
-    xs = np.stack(xs, axis=-1)
-    if reshape:
-        xs = xs.reshape(-1, d)
-        r = r.reshape(-1, n_neurons)
-    return r, xs
-
-
-def hist3d(x, spikes=None, bins=30, lim=((-1, 1), (-1, 1), (-1, 1)), sigma=0):
-    ''' A faster and more generic version of `rate_map`
-    '''
-    if spikes is None:
-        f, xs = np.histogramdd(x, bins=bins, range=lim, density=False)
-        f = f / f.sum()
-    else:
-        if len(spikes.shape) == 1:
-            spikes = spikes[:, None]
-        f = []
-        for i in range(spikes.shape[-1]):
-            fi, xs = np.histogramdd(x[spikes[:, i] >= 1], bins=bins, range=lim, density=False)
-            if sigma > 0: # PSTH
-                fi = gaussian_filter(fi, sigma=sigma, mode='constant')
-            f.append(fi)
-    return np.stack(f, axis=-1), np.stack(xs, axis=-1)
 
 def ms_cluster(samples, bandwidth=0.2, min_bin_freq=20, min_cluster_size=30,
                ignore_range=0.95, plot=True):
@@ -149,63 +80,6 @@ def ms_cluster(samples, bandwidth=0.2, min_bin_freq=20, min_cluster_size=30,
                               if l != -1 and l not in to_del])
     centers = np.stack(centers, axis=0) if centers else np.empty((0, d))
     return unique_labels, labels, centers
-
-def best_plane(ac, az_precision=100, al_precision=50, al_max=np.pi,
-               radial_fraction=RADIAL_FRACTION, radial_method="mean"):
-    """Find the orientation of the autocorrelogram's best hexagonal plane.
- 
-    Parameters
-    ----------
-    ac : (d, d, d) or (d, d, d, n) non-negative autocorrelation cube(s)
- 
-    Returns
-    -------
-    az_best : (n,) azimuth (radians) of the best plane per cell
-    al_best : (n,) altitude (radians) of the best plane per cell
-    hgs_max : (n,) the hexagonal grid score at that best plane
-    """
-    hgs_map, _ = gridness_map(ac, az_precision=az_precision, al_precision=al_precision,
-                              al_max=al_max, radial_fraction=radial_fraction,
-                              radial_method=radial_method)   # (az, al, n)
-    azs = np.linspace(0, np.pi * 2, num=az_precision, endpoint=False)
-    als = np.linspace(0, al_max, num=al_precision, endpoint=False)
-    n = hgs_map.shape[-1]
-    az_best = np.zeros(n)
-    al_best = np.zeros(n)
-    hgs_max = np.zeros(n)
-    for k in range(n):
-        flat = hgs_map[..., k]
-        i, j = np.unravel_index(np.argmax(flat), flat.shape)
-        az_best[k] = azs[i]
-        al_best[k] = als[j]
-        hgs_max[k] = flat[i, j]
-    return az_best, al_best, hgs_max
-
-
-def spatial_info(p, f):
-    p = p[..., None]
-    f_ = f / (f * p).sum(axis=(0, 1, 2))
-    f_[f_ == 0] = 1 
-    return (np.log2(f_) * p * f_).sum(axis=(0, 1, 2))
-
-
-def sparsity_idx(p, f):
-    p = p[..., None]
-    e_f = (f * p).sum(axis=(0, 1, 2))
-    e_f2 = (f**2 * p).sum(axis=(0, 1, 2))
-    return e_f**2 / e_f2
-
-
-def si_shuffle(p, x, spikes, bins=30, sigma=1.5, N=50):
-    sinfo_sf = np.zeros((N, spikes.shape[-1]))
-    sidx_sf = np.zeros((N, spikes.shape[-1]))
-    for i in range(N):
-        spikes_sf = [np.random.permutation(spikes[:, j]) for j in range(spikes.shape[-1])]
-        spikes_sf = np.stack(spikes_sf, axis=-1)
-        f_sf, _ = hist3d(x, spikes_sf, bins=bins, sigma=sigma)
-        sinfo_sf[i] = spatial_info(p, f_sf)
-        sidx_sf[i] = sparsity_idx(p, f_sf)
-    return sinfo_sf, sidx_sf
 
 
 def autocorr_radial(ac, rmax, method='mean'):
@@ -305,7 +179,6 @@ def gridness(ac, lb, ub, hex_only=False):
     sgs : float
         Square gridness score
     '''
-    assert ac.min() >= -1e-10
     radius = int(np.floor(len(ac)/2))
     x = np.arange(-radius, radius+1)
     x = np.stack(np.meshgrid(x, x, indexing='ij'), axis=-1)
@@ -335,116 +208,50 @@ def gridness(ac, lb, ub, hex_only=False):
 
 
 def gridness_map(ac, az_precision=100, al_precision=50, al_max=np.pi,
-                 radial_fraction=RADIAL_FRACTION, radial_method="mean", hex_only=False):
-    """Hexagonal/square gridness over a grid of (azimuth, altitude) planes.
+                 radial_fraction=RADIAL_FRACTION, radial_method="mean", hex_only=False,
+                 azimuths_deg=None, altitudes_deg=None, return_ring=False):
+    """Turns one 3D autocorrelogram into two score maps, one hexagonal and one square. 
+    This is done by cutting a plane through the center at every sampled orientation and 
+    scoring that plane as a flat grid.
     """
-    assert ac.min() >= 0
     assert (ac.shape[0] == ac.shape[1]) and (ac.shape[2] == ac.shape[1]) \
             and (ac.shape[0] == ac.shape[2])
     if len(ac.shape) == 3:
         ac = ac[..., None]
 
     d, n = len(ac), ac.shape[-1]
+    if azimuths_deg is None:
+        azs = np.linspace(0, np.pi * 2, num=az_precision, endpoint=False)
+    else:
+        azs = np.asarray(azimuths_deg, dtype=float) * np.pi / 180.0
+    if altitudes_deg is None:
+        als = np.linspace(0, al_max, num=al_precision, endpoint=False)
+    else:
+        als = np.asarray(altitudes_deg, dtype=float) * np.pi / 180.0
 
-    hgs_map = np.zeros((az_precision, al_precision, n))
-    sgs_map = np.zeros((az_precision, al_precision, n))
-    azs = np.linspace(0, np.pi * 2, num=az_precision, endpoint=False)
-    als = np.linspace(0, al_max, num=al_precision, endpoint=False)
+    hgs_map = np.zeros((len(azs), len(als), n))
+    sgs_map = np.zeros((len(azs), len(als), n))
+    ring = np.zeros((len(azs), len(als), n), dtype=bool)
 
     for i, az in enumerate(azs):
         for j, al in enumerate(als):
             plane = oblique_slice(ac, az, al)
-            plane[plane < 0] = 0
             for k in range(n):
                 corr_radial = autocorr_radial(plane[..., k], int(d * radial_fraction),
                                               method=radial_method)
-                res = peak(corr_radial, plane, az, al)[1]
+                try:
+                    res = peak(corr_radial, plane, az, al)[1]
+                except (AssertionError, ValueError):
+                    hgs_map[i, j, k] = np.nan
+                    sgs_map[i, j, k] = np.nan
+                    continue
                 if len(res) == 0:
                     continue
                 hgs, sgs = gridness(plane, *res, hex_only=hex_only)
-
                 hgs_map[i, j, k] = hgs
                 sgs_map[i, j, k] = sgs
+                ring[i, j, k] = True
+    if return_ring:
+        return hgs_map, sgs_map, ring
     return hgs_map, sgs_map
 
-
-def chi_score(ac, azimuths_deg=CHI_AZIMUTHS_DEG, altitudes_deg=CHI_ALTITUDES_DEG,
-              template=CHI_TEMPLATE, radial_fraction=RADIAL_FRACTION,
-              radial_method="mean"):
-    """Structure scores (chi_fcc, chi_hcp, chi_col) for an autocorrelation cube.
-    """
-    assert ac.min() >= 0
-    assert (ac.shape[0] == ac.shape[1]) and (ac.shape[2] == ac.shape[1]) \
-            and (ac.shape[0] == ac.shape[2])
-    if len(ac.shape) == 3:
-        ac = ac[..., None]
-
-    d, n = len(ac), ac.shape[-1]
-
-    azs = np.asarray(azimuths_deg) * np.pi / 180
-    als = tuple(a * np.pi / 180 for a in altitudes_deg)
-    hgs_map = np.zeros((len(azs), len(als), n))
-    sgs_map = np.zeros((len(azs), len(als), n))
-
-    for i, az in enumerate(azs):
-        for j, al in enumerate(als):
-            plane = oblique_slice(ac, az, al)
-            plane[plane < 0] = 0
-            for k in range(n):
-                corr_radial = autocorr_radial(plane[..., k], int(d * radial_fraction),
-                                              method=radial_method)
-                res = peak(corr_radial, plane, az, al)[1]
-                if len(res) == 0:
-                    continue
-                hgs, sgs = gridness(plane, *res)
-
-                hgs_map[i, j, k] = hgs
-                sgs_map[i, j, k] = sgs
-    f_hgs, f_sgs = template["fcc"]
-    h_hgs, h_sgs = template["hcp"]
-    c_hgs, c_sgs = template["col"]
-    chi_fcc = np.median(hgs_map[f_hgs, 0], axis=0) + np.median(sgs_map[f_sgs, 1], axis=0)
-    chi_hcp = np.median(hgs_map[h_hgs, 0], axis=0) + np.median(sgs_map[h_sgs, 1], axis=0)
-    chi_col = np.median(hgs_map[c_hgs, 0], axis=0) + np.median(sgs_map[c_sgs, 1], axis=0)
-    return chi_fcc, chi_hcp, chi_col
-
-
-def gen_hex_layer(center, r, rotz, bbox=(-1, 1)):
-    points = [center]
-    lb, ub = 0, 1
-    for k in range(round(np.sqrt(8) / r)):
-        for center in points[lb:ub]:
-            for i in range(6):
-                d = i * np.pi / 3 + np.pi / 6 + rotz
-                pt = center + r * np.array([np.cos(d), np.sin(d)])
-                if (pt < bbox[0]).any() or (pt > bbox[1]).any():
-                    continue
-                if (lb > 0) and (np.linalg.norm(pt[None, :] - points, axis=1) < 1e-3).any():
-                    continue
-                points.append(pt)
-        lb = ub
-        ub = len(points)
-    return np.array(points)
-
-
-def hexagonal_structure(struct_type, r, rotz):
-    layera = gen_hex_layer(np.zeros(2), r, rotz, bbox=(-1.5, 1.5))
-    d = np.array([r / np.sqrt(3) * np.cos(rotz), r / np.sqrt(3) * np.sin(rotz)])
-    layerb = gen_hex_layer(d, r, rotz, bbox=(-1.5, 1.5))
-    if struct_type == 'fcc':
-        layers, h = (layera, -layerb, layerb), np.sqrt(6) / 3 * r
-    elif struct_type == 'hcp':
-        layers, h = (layera, -layerb), np.sqrt(6) / 3 * r
-    elif struct_type == 'col':
-        layers, h = (layera,), r/10
-    else:
-        raise ValueError
-
-    centers = []
-    zs = np.arange(-1.2, 1.2, h)
-    for i, z in enumerate(zs):
-        l = layers[i % len(layers)]
-        centers.append(np.hstack((l, np.ones((l.shape[0], 1)) * z)))
-
-    centers = rot_x(np.vstack(centers), np.pi / 180 * rotz, 0)
-    return centers

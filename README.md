@@ -37,7 +37,6 @@ The MADE package used is a bit changed, so not the one that you get from poå
 **Scoring**
 - `gongyu_scoring.py` — Gong & Yu's structure-score code (FCC/HCP/columnar), ported with fixes.
 - `scoring.py` — the project's scoring API: rate maps → autocorrelation → structure scores.
-- `prototypes.py` — ideal FCC/HCP/COL/random lattices to compare real runs against.
 
 **Other**
 - `visualize3D.py`, `utils3D.py` — plotting and batch-simulation helpers.
