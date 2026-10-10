@@ -1,5 +1,4 @@
-from dataclasses import dataclass, field, fields
-import json
+from dataclasses import dataclass, field
 import numpy as np
 
 
@@ -29,21 +28,26 @@ class NetworkConfig:
     # Field spacing on the sheet (cells), not Fourier wavelength.
     bump_spacing_cells: float = 19.8
 
-    # Optional undriven settle. None keeps the formula in BaseExperiment.run.
+    # Undriven settle. None is an error: experiments set this. There is no formula.
     # Frozen networks (trial 69) set this explicitly; do not default to 4000.
     settle_steps:       int | None = None
 
-    #flag related to building dense numoy matricies or skipping that
+    #flag related to building dense numoy matricies or skipping that.
+    # The dense matrix is gone; notebook 3 still passes the flag, and it is ignored.
     build_connectivity: bool  = False
+
+    @property
+    def n(self) -> int:
+        """Neurons along one axis: ceil(2π / spacing)."""
+        return int(np.ceil(2 * np.pi / self.spacing))
 
 
 @dataclass
 class PlaneConfig:
     """Estimator readout: vMF filter, hold, and which normal drives E."""
-    kappa:           float = 10.0  # likelihood concentration for the vMF update
+    kappa_v:         float | None = None  # None uses kappa_sens
     kappa_w:         float = 1e4
     kappa_sens:      float = 300.0
-    measurement:     str   = "sensed"   # "sensed", motion could be implemented later
     plane_mode:      str   = "bayesian"  # "bayesian" (default) or "true"
     tau_refresh:     int   = 1
     refresh_timing:  str   = "free"     # harness
@@ -64,36 +68,20 @@ class ExperimentConfig:
 
     omega_std:        float = 0.03
     #NOTE: How many of this is needed, look at this one more time then
-    record_stride:    int   = 20 #How many recordings
-    record:           bool  = True
     ratemap_bins:     int   = 40
-    ratemap_ndim:     int   = 2
     ratemap_n_sub:    int   = 0
     ratemap_n_shuffle: int  = 0
+    ratemap_n_null:   int   = 300
     ratemap_seed:     int   = 0
     ratemap_active_thresh: float = 1e-3
-    scale:            float = field(init=False)
-
-    def __post_init__(self):
-        # Fallback until RunConfig overwrites
-        self.scale = (2 * np.pi) / self.grid_spacing      # the metres→radians conversion from the world manifold to the tours manifold and visa versa  NOTE: fallback only; RunConfig overwrites with G
-
-    def m_to_rad(self, x_m):   return x_m * self.scale
-    def rad_to_m(self, x_rad): return x_rad / self.scale
 
 
 @dataclass
 class AnalysisConfig:
     """Offline scoring parameters, read by everything under analysis/."""
-    bins:            int   = 40     # histogram bins/axis for rate map + autocorrelogram
     smooth_sigma:    float = 1.75   # gaussian_filter sigma, in BINS (see note below)
-    n_neuron:        int   = 300    # default cells subsampled for a volumetric score
-    go_az_precision: int   = 48     # global-order azimuth samples
-    go_al_precision: int   = 24     # global-order altitude samples
 
-    # These three numbers limit the saved trace of network activity.
     field_stride:       int = 10
-    n_traced_cells:     int = 600
     max_trace_bytes:    int = 1024 ** 3
 
 
@@ -105,16 +93,14 @@ class RunConfig:
     analysis:   AnalysisConfig   = field(default_factory=AnalysisConfig)
     # no spacing/grid_spacing assert: different unit systems, no reason to match
 
-    def __post_init__(self):
-        n = int(np.ceil(2 * np.pi / self.network.spacing))
-        self.experiment.scale = float(
+    @property
+    def scale(self) -> float:
+        """Metres to radians, from the sheet size and the field spacing."""
+        n = self.network.n
+        return float(
             2 * np.pi * self.network.bump_spacing_cells
             / (n * self.experiment.grid_spacing)
         )
-
-
-
-
 
 def world_to_normalized(world_pos, env_size):
     """Map physical position (metres, within ±env_size/2) to the [-1,1] cube
@@ -136,8 +122,3 @@ def world_to_flat_bins(world_pos, env_size, bins, ndim=2):
     for d in range(1, ndim):
         flat = flat * bins + idx[:, d]
     return flat
-
-
-def world_to_flat_bins_3d(world_pos, env_size, bins):
-    """The 3-D case, for call sites that ask for it by name."""
-    return world_to_flat_bins(world_pos, env_size, bins, ndim=3)

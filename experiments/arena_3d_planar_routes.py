@@ -8,6 +8,8 @@ from experiments.base import (
 )
 from model.path_integration import frame
 
+HOME_PERCH = np.array([-1.0, 0.0, 0.0])
+
 
 def _normal_at(tilt_deg, azimuth):
     """builds the unit normal of one tilted plane."""
@@ -19,19 +21,6 @@ def _normal_at(tilt_deg, azimuth):
         np.cos(tilt),
     ])
     return n / np.linalg.norm(n)
-
-
-def _route_row(route, sheet, role, n_true, plane_distance):
-    """One scheduled route witch the later analysis uses"""
-    if role not in ("long", "revisit"):
-        raise ValueError(f"unknown route role {role!r}")
-    return {
-        "route": int(route), #id of the flight
-        "sheet": int(sheet), #id of the plane
-        "role": role, #"long" or "revisit" NOTE: dont know if needed
-        "n_true": np.asarray(n_true, dtype=float).copy(), #unit normal of the plane
-        "plane_distance": float(plane_distance),
-    }
 
 
 def takeoff_heading(n, wall_in, rng, spread_deg):
@@ -150,22 +139,17 @@ def make_route(P, wall_in, cfg, w, rng, max_len_m=20.0):
     Q = positions[-1].copy()
     if float(np.linalg.norm(Q - P)) < 1e-3:
         return None
-    length = float(np.linalg.norm(np.diff(positions, axis=0), axis=1).sum())
     return dict(
         n_true=n.copy(),
-        plane_distance=float(np.dot(n, P)),
         positions=positions,
         velocities=velocities,
         Q=Q,
-        length_m=length,
     )
 
 
 def build_routes(cfg, w, rng, max_draws=None):
     """Draw until rotes until we have enough routes."""
-    P = np.asarray(cfg.home_perch, dtype=float)
-    if not np.allclose(P, (-1.0, 0.0, 0.0)):
-        raise ValueError(f"home_perch must be (-1, 0, 0), got {tuple(float(x) for x in P)}")
+    P = np.asarray(HOME_PERCH, dtype=float)
     # Into the box from the perch on the left wall, (-1, 0, 0).
     wall_in = np.array([1.0, 0.0, 0.0])
     n_routes = int(cfg.n_routes)
@@ -234,23 +218,12 @@ def _rest(blocks, where, n_steps, normal, segment, plane):
 
 
 def _route_table(routes):
-    """writes one outbound row and one return row for each stored flight."""
+    """One outbound row and one return row for each stored flight."""
     rows = []
     for r, route in enumerate(routes):
-        out = _route_row(2 * r, 2 * r, "long", route["n_true"], route["plane_distance"])
-        out.update(
-            base_route=int(r),
-            direction="out",
-            length_m=float(route["length_m"]),
-        )
-        rows.append(out)
-        back = _route_row(2 * r + 1, 2 * r, "revisit", route["n_true"], route["plane_distance"])
-        back.update(
-            base_route=int(r),
-            direction="back",
-            length_m=float(route["length_m"]),
-        )
-        rows.append(back)
+        n_true = np.asarray(route["n_true"], dtype=float).copy()
+        rows.append({"route": 2 * r, "n_true": n_true.copy()})
+        rows.append({"route": 2 * r + 1, "n_true": n_true.copy()})
     return rows
 
 
@@ -266,7 +239,7 @@ def make_planar_routes_trajectory(cfg, dt, scale, dim, rng=None, turn_std=None):
     schedule = build_schedule(cfg.n_routes, cfg.round_trips, rng)
     
     #Get the home perch
-    P = np.asarray(cfg.home_perch, dtype=float)
+    P = np.asarray(HOME_PERCH, dtype=float)
     #how long the rest are.
     rest_n = int(cfg.rest_steps)
     
@@ -304,8 +277,7 @@ def make_planar_routes_trajectory(cfg, dt, scale, dim, rng=None, turn_std=None):
         t += len(route["positions"])
         flight_table.append(dict(
             flight=int(flight), route=int(out_label), base_route=base,
-            repeat=repeat, direction="out", t0=int(t0), t1=int(t),
-            length_m=float(route["length_m"]),
+            direction="out", t0=int(t0), t1=int(t),
         ))
         #Rest at the landing
         _rest(blocks, route["Q"], rest_n, normal, trip, sheet)
@@ -322,8 +294,7 @@ def make_planar_routes_trajectory(cfg, dt, scale, dim, rng=None, turn_std=None):
         t += len(back_pos)
         flight_table.append(dict(
             flight=int(flight), route=int(back_label), base_route=base,
-            repeat=repeat, direction="back", t0=int(t0), t1=int(t),
-            length_m=float(route["length_m"]),
+            direction="back", t0=int(t0), t1=int(t),
         ))
         #Rest back at the perch.
         _rest(blocks, P, rest_n, normal, trip, sheet)
@@ -334,28 +305,21 @@ def make_planar_routes_trajectory(cfg, dt, scale, dim, rng=None, turn_std=None):
     world = np.concatenate(blocks["pos"], axis=0)
     vel = np.concatenate(blocks["vel"], axis=0)
     n_true = np.concatenate(blocks["n"], axis=0)
-    segment_id = np.concatenate(blocks["seg"], axis=0)
-    route_of = np.concatenate(blocks["route"], axis=0)
     flight_of = np.concatenate(blocks["flight"], axis=0)
     plane_ids = np.concatenate(blocks["plane"], axis=0)
     torus_gt = torus_gt_from_velocity(vel, n_true, scale, dim)
-    traj = Trajectory(
+    return Trajectory(
         world_pos=world,
         v_body_seq=vel,
         torus_gt=torus_gt,
         n_true_seq=n_true,
-        segment_id=segment_id,
         segment_starts=np.asarray(starts, dtype=int),
         plane_id=plane_ids,
-        route_of=route_of,
         flight_of=flight_of,
         route_table=_route_table(routes),
         flight_table=flight_table,
+        n_route_draws=int(n_drawn),
     )
-    traj.n_route_draws = int(n_drawn)
-    traj.routes = routes
-    traj.schedule = np.asarray(schedule, dtype=int)
-    return traj
 
 
 def columnar_ground_truth(traj, scale, dim):
@@ -370,35 +334,25 @@ class Arena3DPlanarRoutesConfig(ExperimentConfig):
     """Round trips of stored flights from one perch."""
     n_routes: int = 40
     round_trips: int = 10
-    home_perch: tuple = (-1.0, 0.0, 0.0)
     takeoff_spread_deg: float = 60.0
     rest_steps: int = 500
     tilt_min_deg: float = 25.0
     tilt_max_deg: float = 50.0
-    ratemap_ndim: int = 3
     ratemap_n_sub: int = 600
     ratemap_n_shuffle: int = 0
-
-    @property
-    def run_name(self) -> str:
-        return (
-            f"arena3d_routes_n{self.n_routes}_m{self.round_trips}_"
-            f"seed{self.seed}"
-        )
 
 
 class Arena3DPlanarRoutesExperiment(BaseExperiment):
     condition_label = "planar_routes"
+    ratemap_ndim = 3
 
     def generate_trajectory(self, turn_std: float = None, n_steps=None, seed=None):
-        w = self._walk_params(turn_std, n_steps, seed)
-        traj = make_planar_routes_trajectory(
+        rng = None if seed is None else np.random.default_rng(int(seed))
+        return make_planar_routes_trajectory(
             self.config.experiment,
-            dt=w.dt,
-            scale=w.scale,
+            dt=self.config.network.dt,
+            scale=self.config.scale,
             dim=self.qan.manifold.dim,
-            rng=w.rng,
+            rng=rng,
             turn_std=turn_std,
         )
-        self.config.experiment.n_steps = int(len(traj.world_pos))
-        return traj

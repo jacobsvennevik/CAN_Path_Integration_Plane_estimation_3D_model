@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.special import iv, ive
+from scipy.special import ive
 
 """
 Recursive von Mises-Fisher filter on S^2, following Kurz et al. (2016),
@@ -36,27 +36,12 @@ def A_d_inverse(r, d=D, iters=3, kappa_max=1e6):
     return float(min(max(kappa, 0.0), kappa_max))
 
 
-def c_d(kappa, d=D):
-    """ Computes the normalization constant for the von Mises-Fisher distribution."""
-    return kappa ** (d / 2.0 - 1.0) / ((2.0 * np.pi) ** (d / 2.0) * iv(d / 2.0 - 1.0, kappa))
-
-
 class VonMisesFisherDistribution:
     """ The von Mises-Fisher distribution on the sphere. Holds the filter state."""
     def __init__(self, mu, kappa):
         mu = np.asarray(mu, dtype=float)
         self.mu = mu / np.linalg.norm(mu)
         self.kappa = float(kappa)
-
-    @property
-    def mode(self): 
-        """ Returns the mode of the distribution, the most likely direction."""
-        return self.mu
-
-    def pdf(self, x):
-        """ Evaluates the density at a point, diganostic"""
-        x = np.asarray(x, dtype=float)
-        return c_d(self.kappa) * np.exp(self.kappa * (x @ self.mu))
 
     def __repr__(self):
         return (f"VonMisesFisherDistribution(\n"
@@ -169,19 +154,6 @@ def sample_vmf(mu, kappa, rng):
         w = 1.0 + np.log(u + (1.0 - u) * np.exp(-2.0 * kappa)) / kappa 
     s = np.sqrt(max(1.0 - w * w, 0.0)) # the sideways part of the sample points
     return build_rotation_matrix(mu).T @ np.array([s * np.cos(phi), s * np.sin(phi), w]) #builds the vector and then rotates it to face μ.
-
-
-def init_from_normal_guess(n_hat_guess, kappa=0.1):
-    """
-    Weak prior centered on the guessed plane normal.
-    """
-    return VonMisesFisherDistribution(n_hat_guess, kappa)
-
-
-def angular_error_s2(est_mode, n_true):
-    """ Use for visualisation and checking in experiemnts """
-    dot = np.clip(np.dot(est_mode, n_true), -1.0, 1.0)
-    return np.rad2deg(np.arccos(dot))
 
 
 def held_normal_stats(n_held, n_true, refresh_mask):

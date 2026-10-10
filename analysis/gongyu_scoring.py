@@ -1,6 +1,5 @@
 """
 Gong & Yu's scoring logic, pasted almost verbatum to keep consistency.
-
 """
 
 import numpy as np

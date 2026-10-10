@@ -1,4 +1,4 @@
-from made.can import CAN, relu
+from made.can import CAN
 from dataclasses import dataclass, field
 import numpy as np
 
@@ -42,23 +42,12 @@ def kernel_field_on_grid(kernel, metric, n: int, offset=None,
 
 @dataclass(kw_only=True)
 class CAN3D(CAN):
-    """CAN with tunable feedforward drive b. Might not have much of a difference
+    """CAN with tunable feedforward drive b.
 
-    Inherits all behavior from CAN, but change step_stateless to be able to tune b 
-
-    b, build_connectivity, kernel and dt are required: they come from
-    NetworkConfig, by way of the QAN that builds this. kw_only=True is what
-    allows them to be required at all, since the parent class already defines
-    fields that have defaults.
-
-    Attributes:
-        b (float): Constant feedforward excitatory drive.
-        build_connectivity (bool): dense numpy matrix vs the torch FFT path.
-        kernel: the Kernel_BF the QAN passes in.
-        dt (float): forward-Euler step, in the same units as tau.
+    b, kernel and dt come from NetworkConfig, by way of the QAN that builds this.
+    The recurrent weights are applied by the FFT backend, not a dense matrix.
     """
     b: float
-    build_connectivity: bool
     kernel: object
     dt: float
 
@@ -66,38 +55,9 @@ class CAN3D(CAN):
         self.neurons_coordinates = (
             self.manifold.parameter_space.sample_with_spacing(self.spacing)
         )
-        if self.build_connectivity:
-            distances = self.manifold.metric.pairwise_distances(
-                self.neurons_coordinates, weights_offset=self.weights_offset)
-            self.connectivity_matrix = self.kernel(distances)
         self.S = np.zeros((self.neurons_coordinates.shape[0], 1))
-    def step_stateless(self, S, u=0):
-        """
-        Override function
 
-        """
-        if not hasattr(self, "connectivity_matrix"):
-            raise AttributeError(
-                "step_stateless needs connectivity_matrix, which was skipped "
-                "(build_connectivity=False). Use the torch FFT backend for fine-spacing runs."
-            )
-        S_dot = self.connectivity_matrix @ S + u + self.b
-        new_S = S + (self.dt / self.tau) * (relu(S_dot) - S)
 
-        if np.any(np.isnan(new_S)):
-            raise ValueError("NaN values detected in new state.")
-
-        return new_S
-    
-    @property
-    def weight_matrix(self) -> np.ndarray:
-        if not hasattr(self, "connectivity_matrix"):
-            raise AttributeError(
-                "connectivity_matrix was not built (build_connectivity=False). "
-                "Use the torch FFT backend (TorchBackend), which never needs the dense matrix."
-            )
-        return self.connectivity_matrix
-    
 @dataclass
 class Kernel_BF:
     """Center-surround Kernel by Burak and Fiete, difference of Gaussians recurrent kernel.

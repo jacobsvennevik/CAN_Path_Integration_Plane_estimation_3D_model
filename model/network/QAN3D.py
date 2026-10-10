@@ -37,7 +37,6 @@ class Torus3DQAN(QAN):
     dt:                 float   # forward-Euler step size, in the same units as tau
     tau:                float   # neural time constant, same units as dt
     velocity_gain:      float   # per-CAN velocity gain, MADE's QAN.beta slot
-    build_connectivity: bool    # If to build the dense matrix or the FFT-based TorchBackend.
 
     @classmethod
     def from_config(cls, cfg):
@@ -48,8 +47,7 @@ class Torus3DQAN(QAN):
                    ratio=cfg.ratio, b=cfg.b, offset_magnitude=cfg.offset_magnitude,
                    alpha=cfg.alpha,
                    dt=cfg.dt, tau=cfg.tau,
-                   velocity_gain=cfg.velocity_gain,
-                   build_connectivity=cfg.build_connectivity)
+                   velocity_gain=cfg.velocity_gain)
 
     def __post_init__(self):
         """Build one DoG kernel at the configured gain and inject it."""
@@ -69,24 +67,13 @@ class Torus3DQAN(QAN):
                 self.cans.append(
                     CAN3D(
                         self.manifold, self.spacing, 1.0, self.kernel.sigma_i,   # alpha,sigma slots vestigial (MADE parent)
-                        build_connectivity=self.build_connectivity, b=self.b,
-                        kernel=self.kernel, dt=self.dt, tau=self.tau,
-                        weights_offset=lambda x, d=d, direction=direction: (
-                            self.coordinates_offset(x, d, direction, self.offset_magnitude)),
+                        b=self.b, kernel=self.kernel, dt=self.dt, tau=self.tau,
+                        weights_offset=lambda x, d=d, direction=direction, mag=self.offset_magnitude: (
+                            _shift_coordinates(x, d, direction, mag)),
                     )
                 )
         self.can_dims = np.array(self.can_dims, dtype=int)
         self.can_signs = np.array(self.can_signs, dtype=float)
-
-    @staticmethod
-    def coordinates_offset(
-        theta: np.ndarray, dim: int, direction: int, offset_magnitude: float
-    ) -> np.ndarray:
-        """Offset coordinates along one dimension creaing an asymetric weight matricies, this makes the QAN drift and wrapping modulo 2π to create the periodicity."""
-        theta = theta.copy()
-        theta[:, dim] += direction * offset_magnitude
-        theta[:, dim] = np.mod(theta[:, dim], 2 * np.pi)
-        return theta
 
     def make_trajectory(self, n_steps: int = 1000, speed: float = None) -> np.ndarray:
         """Test path with incommensurate rates so the trajectory densely covers T^d.
@@ -129,12 +116,10 @@ class Torus3DQAN(QAN):
         """
         return self.velocity_gain / self.offset_magnitude
 
-    def can_velocity_drives(self, theta_dot: np.ndarray) -> np.ndarray:
-        """Per-CAN velocity drive v_m for an angular velocity, shape (n_cans,).
 
-        Each CAN is driven by the velocity component along its own axis, signed
-        by its own direction. The torch backend computes the same thing as
-        tensors, from ``can_dims``/``can_signs``.
-        """
-        theta_dot = np.asarray(theta_dot, dtype=float)
-        return self.can_signs * self.drive_per_theta_dot * theta_dot[self.can_dims]
+def _shift_coordinates(theta, dim, direction, offset_magnitude):
+    """Shift one axis and wrap. This is the offset that makes a CAN drift."""
+    theta = np.array(theta, dtype=float, copy=True)
+    theta[:, dim] += direction * offset_magnitude
+    theta[:, dim] = np.mod(theta[:, dim], 2 * np.pi)
+    return theta

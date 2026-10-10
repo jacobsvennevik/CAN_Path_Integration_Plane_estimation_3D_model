@@ -12,14 +12,11 @@ class Arena2DConfig(ExperimentConfig):
     ratemap_n_sub: int = 300
     ratemap_n_shuffle: int = 50
 
-    @property
-    def run_name(self) -> str:
-        return f"arena2d_T{self.n_steps}_seed{self.seed}_envSize{self.env_size:}_gridSpacing{self.grid_spacing}"
-
 
 class Arena2DExperiment(BaseExperiment):
 
     condition_label = "arena_2d"
+    ratemap_ndim = 2
 
     def generate_trajectory(self, turn_std: float = None, n_steps=None, seed=None):
         """

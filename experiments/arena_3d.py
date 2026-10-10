@@ -7,23 +7,14 @@ from experiments.base import BaseExperiment, Trajectory, world_to_torus_gt
 
 @dataclass
 class Arena3DConfig(ExperimentConfig):
-    ratemap_ndim: int = 3
     ratemap_n_sub: int = 300
     ratemap_n_shuffle: int = 20
-
-    @property
-    def run_name(self) -> str:
-        return f"arena3d_T{self.n_steps}_seed{self.seed}_envSize{self.env_size:}_gridSpacing{self.grid_spacing}"
 
 
 class Arena3DExperiment(BaseExperiment):
     condition_label = "arena_3d"
-
-    def __init__(self, config, record=None, plane_mode=None):
-        assert config.experiment.ratemap_ndim == 3
-        super().__init__(config, record=record, plane_mode=plane_mode)
-        # plane_mode: flip the filter on/off when given; otherwise PlaneConfig.plane_mode
-        
+    ratemap_ndim = 3
+ 
 
     def generate_trajectory(self, turn_std: float = None, n_steps=None, seed=None):
         """Independent 3D reflecting walk. n_steps and seed default to config.

@@ -10,11 +10,6 @@ Bingham filter on S² (Kurz et al., 2014) that estimates the reference-plane nor
 and keeps a running belief. This replaces the fixed projection + injected von Mises–Fisher noise of
 Gong & Yu (2021) with a genuinely 3D integrator and a real estimator.
 
-> **Setup note:** the MADE package is patched locally at
-> `./.venv/lib/python3.14/site-packages/made/manifolds.py` (Python 3.14 venv).
-The MADE package used is a bit changed, so not the one that you get from poå
-
-
 ## Files
 
 **Manifold & network**
@@ -41,7 +36,7 @@ The MADE package used is a bit changed, so not the one that you get from poå
 **Other**
 - `visualize3D.py`, `utils3D.py` — plotting and batch-simulation helpers.
 - `notebooks/` — step-by-step checks (connectivity, filter, manifold, full pipeline, scoring).
-- Outputs go in `results/` (gitignored). See `docs/implementation/` for the full per-module reference.
+- Outputs go in `results/` (gitignored).
 
 ## Key references
 

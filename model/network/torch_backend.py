@@ -40,7 +40,6 @@ class BumpTracker:
 
         self.c_prev = None   # bump centre in grid cell
         self.pos = None      # unwrapped position in radians
-        self.history = [] # recoding the path of the tracker, for visualisation
 
     def _window(self, volume, centre, offs):
         """Gets the window of cells around the center cell (its a cube)"""
@@ -107,9 +106,10 @@ class TorchBackend:
     """
 
     qan: object                                  # Torus3DQAN instance
-    torch_dtype: torch.dtype = torch.float32    #Uses cheeper float32 
+    torch_dtype: torch.dtype = torch.float32
+    device: object = None
 
-    device: torch.device = field(init=False)
+    # Filled in __post_init__ when device was None.
     S:      torch.Tensor = field(init=False) #The current neural activity
     coords: torch.Tensor = field(init=False) #Torus coordinates
     tau:    torch.Tensor = field(init=False) #Neural time constant
@@ -118,7 +118,10 @@ class TorchBackend:
     tracker: BumpTracker = field(init=False, default=None) #persistent bump follower
 
     def __post_init__(self):
-        self.device = self._get_torch_device()
+        if self.device is None:
+            self.device = self._get_torch_device()
+        else:
+            self.device = torch.device(self.device)
         self._init_torch_backend()
 
     # I use mps
@@ -141,7 +144,7 @@ class TorchBackend:
         At d=3 that is (6, n, n, n//2+1).
         """
         metric     = self.qan.manifold.metric
-        kernel_fn  = self.qan.kernel              # the injected Kernel_BF (your B&F DoG)
+        kernel_fn  = self.qan.kernel              # recurrent kernel (Kernel_BF)
         offset_mag = self.qan.offset_magnitude
 
         grid = torus_grid(n, d=self.d)            # built once, reused per offset
@@ -154,7 +157,7 @@ class TorchBackend:
                             device=fft_device)
 
         for i, (dim, sign) in enumerate(zip(self.qan.can_dims, self.qan.can_signs)):
-            # constant axis offset δ for this CAN (flat-torus Killing field)
+            # constant offset along this CAN's axis
             delta = np.zeros(self.d); delta[dim] = sign * offset_mag
 
             kernel = kernel_field_on_grid(
@@ -175,7 +178,7 @@ class TorchBackend:
 
         S_nd = S_shared[0].squeeze(-1).reshape(shape)
 
-        # Remove the .cpu() calls — stay on device for CUDA
+        # MPS runs the FFT on CPU. CUDA and CPU stay on device.
         if self.device.type == "mps":
             S_nd  = S_nd.cpu()
             W_fft = self.W_fft.cpu()
@@ -378,7 +381,7 @@ class TorchBackend:
     def seed_tracker(self, theta_0, radius=None, seed_radius=None):
         """Start a persistent bump follower on the CURRENT state.
 
-        Default radius is period/4 (as before). The COM window is a sphere.
+        Default radius is a quarter of the lattice period. The COM window is a sphere.
         """
         period = self.bump_period_cells()
         if radius is None:
@@ -391,9 +394,9 @@ class TorchBackend:
         )
         return self.tracker.seed(vol, theta_0)
 
-    def track_step(self) -> np.ndarray:
-        """Advance the bump tracker by one frame of the current volume."""
-        return self.tracker.advance(self.current_volume())
+    def sheet_mean(self) -> torch.Tensor:
+        """Mean activity across populations, shape (N,)."""
+        return self.S.mean(dim=0).squeeze()
 
     def track_batch(self, S_chunk: torch.Tensor) -> np.ndarray:
         """Decode a (T, N) activity chunk; tracker state carries across frames."""
@@ -409,7 +412,6 @@ class TorchBackend:
             self.step_from_shared_state(torch.mean(self.S, dim=0), zero_v)
         s = torch.mean(self.S, dim=0); m = float(s.mean())
         pk = float(s.max()) / m if m > 1e-12 else float("nan")
-        self.last_peakedness = pk
         if not np.isfinite(pk) or pk < min_peakedness:
             print(f"WARNING: peakedness {pk:.2f} after {int(settle)} settle steps "
                   f"(want >= {min_peakedness:.1f}; ~1 = no lattice)")
@@ -426,13 +428,12 @@ class TorchBackend:
         Takes the formed lattice, steps the QAN along trajectory, and returns the decoded bump path.
 
         ``on_volume(t, vol)`` is optional. Called once with ``t=-1`` on the
-        latched volume before the first step, then with ``t=0..T-1`` after
-        each step. Diagnostic scripts use this; production callers ignore it.
+        volume before the first step, then with ``t=0..T-1`` after each step.
         """
         theta_0 = trajectory[0, :].copy() #walk starting position
         self.seed_tracker(theta_0, radius=radius, seed_radius=seed_radius) #seed the tracker with the starting position
 
-        #1. Allocate space for the decoded bump path in the 10 next lines:
+        # decoded path, display frames, and volume snapshots
         n, d, T = self.n, self.d, trajectory.shape[0]
         shape = (n,) * d
         n_frames = (T + display_stride - 1) // display_stride
@@ -442,13 +443,12 @@ class TorchBackend:
         pos = np.empty((T, d), dtype=np.float64)
         self.display_stride = display_stride
         self.display_marginals = np.empty((n_frames, d, n), dtype=np.float32)
-        self.snapshot_stride = snapshot_stride
         self.snapshot_times = np.arange(0, T, snapshot_stride)
         n_snap = len(self.snapshot_times)
         self.snapshots = np.empty((n_snap, *shape), dtype=np.float32)
         self.snapshot_cells = np.empty((n_snap, d), dtype=np.float64)
         buf = (torch.empty((T, self.S.shape[1]), dtype=self.torch_dtype, device=self.device)
-               if return_states else None) #Allocate the 
+               if return_states else None)
 
         #2. each timestep:
         for t in range(T):
@@ -483,11 +483,10 @@ class TorchBackend:
                 buf[t] = S_tot
         
         #3. Return 
-        self.pos_com_unwrapped = pos #unwrapped position of the com
         out = np.mod(pos, 2 * np.pi) #wrapped position of the com
         if return_states:
             return out, buf.detach().cpu().numpy()
-        return out #retunr wrapped position of the com
+        return out
 
     def simulate(self, trajectory: np.ndarray, settle=3000,
                  return_states=False, radius: int = None,
@@ -495,59 +494,11 @@ class TorchBackend:
                  min_peakedness: float = 3.0,
                  display_stride: int = 8,
                  snapshot_stride: int = 100) -> np.ndarray:
-        """Settle then drive. Prefer form_lattice + drive when gates run in between."""
+        """Form the lattice, then drive along the trajectory."""
         self.form_lattice(trajectory[0], settle=settle, min_peakedness=min_peakedness)
         return self.drive(trajectory, return_states=return_states, radius=radius,
                           seed_radius=seed_radius, display_stride=display_stride,
                           snapshot_stride=snapshot_stride)
-
-    def run(self, trajectory: np.ndarray):
-        """
-        Run torch dynamics without decoding.
-
-        Useful when you only care about final CAN state.
-        """
-
-        theta_0 = trajectory[0, :].copy()
-        self.reset(theta_0, radius=0.05)
-
-        for t in range(trajectory.shape[0]):
-            self.step(self.qan.theta_dot_at(trajectory, t))
-
-        return self.S
-
-    def sync_to_cans(self):
-        """
-        Copy torch states back into the individual CAN3D NumPy objects.
-        """
-        S_np = self.S.detach().cpu().numpy()
-
-        for i, can in enumerate(self.qan.cans):
-            can.S = S_np[i]
-
-    def get_states(self):
-        """
-        Return current torch states as a NumPy array with shape (n_cans, N, 1).
-        """
-        return self.S.detach().cpu().numpy()
-    
-    def allocate_state_buffer(self, T: int, stride: int = 1) -> "torch.Tensor":
-        """Make room an on-device buffer for recording S_tot at each timestep."""
-        N = self.S.shape[1]
-        n_frames = (T + stride - 1) // stride
-        return torch.empty(
-            (n_frames, N),
-            dtype=self.torch_dtype,
-            device="cpu",
-        )
-
-    def record_state_to_buffer(self, buf: "torch.Tensor", t: int, stride: int = 1) -> None:
-        """Write current S_tot into row t of the buffer. No CPU transfer."""
-        buf[t // stride] = self.S.mean(dim=0).squeeze().to(buf.device)
-
-    def buffer_to_numpy(self, buf: "torch.Tensor") -> "np.ndarray":
-        """Single CPU transfer of the full buffer."""
-        return buf.cpu().numpy()
 
     def allocate_ratemap(self, total_bins: int, sub_t=None) -> tuple:
         """On-device accumulator for the 2-D per-neuron rate map.."""
@@ -556,12 +507,14 @@ class TorchBackend:
         counts = torch.zeros( total_bins,      dtype=torch.float32, device=self.device)
         return sums, counts
 
-    def record_ratemap(self, acc: tuple, flat_bin: int, sub_t=None) -> None:
-        """Accumulate current S_tot into bins (much cheeper and quicker).
-        The caller computes flat_bin so the backend stays unaware of arena geometry."""
+    def record_ratemap(self, acc: tuple, flat_bin: int, sub_t=None, activity=None) -> None:
+        """Add the current sheet mean into one spatial bin.
+
+        flat bin indexes the arena bin. Pass activity when the sheet
+        mean is already available."""
         sums, counts = acc
         with torch.no_grad():
-            s = self.S.mean(dim=0).squeeze()
+            s = self.sheet_mean() if activity is None else activity
             if sub_t is not None:
                 s = s[sub_t]
             sums[flat_bin] += s
@@ -583,14 +536,17 @@ class TorchBackend:
                            dtype=torch.float32, device=self.device)
  
     def record_shuffle_ratemap(self, shuf_sums, flat_indices, t: int,
-                               lags, sub_t=None) -> None:
-        """Accumulate time-shifted activity for each shuffle."""
+                               lags, sub_t=None, activity=None) -> None:
+        """Accumulate time-shifted activity for every shuffle in one write."""
         with torch.no_grad():
-            s = self.S.mean(dim=0).squeeze()
+            s = self.sheet_mean() if activity is None else activity
             if sub_t is not None:
                 s = s[sub_t]
-            T = len(flat_indices)
-            for j in range(shuf_sums.shape[0]):
-                b = int(flat_indices[(t + int(lags[j])) % T])
-                shuf_sums[j, b] += s
+            lags_t = torch.as_tensor(np.asarray(lags), device=shuf_sums.device, dtype=torch.long)
+            flat = torch.as_tensor(np.asarray(flat_indices), device=shuf_sums.device, dtype=torch.long)
+            shifted = (int(t) + lags_t) % flat.shape[0]
+            bins = flat[shifted]
+            rows = torch.arange(bins.shape[0], device=shuf_sums.device)
+            values = s.unsqueeze(0).expand(bins.shape[0], s.shape[0])
+            shuf_sums.index_put_((rows, bins), values, accumulate=True)
 

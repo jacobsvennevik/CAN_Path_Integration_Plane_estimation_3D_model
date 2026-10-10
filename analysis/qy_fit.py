@@ -1,4 +1,5 @@
 """Qi and Yartsev single-cell lattice fit"""
+import os
 import numpy as np
 from scipy.special import xlogy
 
@@ -101,14 +102,6 @@ def lattice_g(xy, spacing, orientation_deg, n_phase=N_PHASE, floor=FLOOR):
     return total + float(floor)
 
 
-def closed_form_amplitude(n_spikes, occupancy):
-    """Gives the amplitude that maximises the log-likelihood."""
-    occupancy = float(occupancy)
-    if occupancy <= 0.0:
-        raise ValueError("occupancy must be positive")
-    return float(n_spikes) / occupancy
-
-
 def log_likelihood_from_parts(n_spikes, occupancy, spike_term):
     """LL poisson log-likelihood"""
     n_spikes = np.asarray(n_spikes, dtype=float)
@@ -150,19 +143,18 @@ def _lag_matrix(slices, n_shuffles, rng):
     return lags
 
 
-def _routes(flight_of, flight_table, route_table, qy_routes):
-    "takes the downsampled recording and builds one packed sequence per route"
-    if qy_routes not in ("out", "out_and_back"):
-        raise ValueError(f"unknown qy_routes {qy_routes!r}")
-    keep = {"out"} if qy_routes == "out" else {"out", "back"}
+def _routes(flight_of, flight_table, route_table):
+    """One packed sequence per route.
+
+    Qi and Yartsev fit each flight cluster on its own, and they find these
+    clusters by grouping flights that follow nearly the same path from start
+    to finish. A return starts at the other end, so it gets a route of its own.
+    """
     normals = {int(row["route"]): np.asarray(row["n_true"], dtype=float) for row in route_table}
-    
+
     #put all the flights for each route together
     grouped = {}
     for row in flight_table:
-        direction = row.get("direction", "out")
-        if direction not in keep:
-            continue
         grouped.setdefault(int(row["route"]), []).append(row)
      
     routes = []
@@ -275,9 +267,24 @@ def _z_against(value, null):
     return z
 
 
-def _loo_z(values):
-    """Gives each shuffle its own z-score using the others in comparison """
+def _loo_z(values, chunk=256):
+    """Gives each shuffle its own z-score using the others in comparison.
+
+    The cell axis is scored in chunks. Each cell is independent, so the
+    values match a single pass over the whole array.
+    """
     values = np.asarray(values, dtype=float)
+    n_cells = values.shape[-1]
+    if n_cells <= int(chunk):
+        return _loo_z_block(values)
+    parts = [
+        _loo_z_block(values[..., start:start + int(chunk)])
+        for start in range(0, n_cells, int(chunk))
+    ]
+    return np.concatenate(parts, axis=-1)
+
+
+def _loo_z_block(values):
     n = values.shape[0]
     if n < 3:
         return np.zeros_like(values)
@@ -322,105 +329,94 @@ def _streams(seed):
     return np.random.default_rng(spike_seed), np.random.default_rng(shift_seed)
 
 
-def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
-               seed, n_target=N_TARGET, qy_routes="out", n_shuffles=N_SHUFFLES,
-               spacings=None, orientations=None, n_phase=N_PHASE):
-    """
-    Fits one spacing per cell. It picks one spacing for the cell 
-    and lets orientation and phase be chosen separately on every route.
-    """
-    #setup everything
-    positions = np.asarray(positions, dtype=float)
-    activity = np.asarray(activity, dtype=float)
-    routes = _routes(flight_of, flight_table, route_table, qy_routes)
-    if spacings is None:
-        spacings = spacing_values()
-    if orientations is None:
-        orientations = orientation_values()
-    spacings = np.asarray(spacings, dtype=float)
-    orientations = np.asarray(orientations, dtype=float)
+def _default_jobs():
+    return max(1, (os.cpu_count() or 1) - 1)
+
+
+def _prepare_arm(activity, seed, routes, positions, n_target, n_shuffles):
+    """Draw this arm's spikes and lags. Geometry (the chart) is shared."""
     spike_rng, shift_rng = _streams(seed)
     #concatenate all the activity traces for each route
     pieces = [activity[route["index"]] for route in routes]
     #draws spikes for each cell based on its activity trace
     spikes = draw_spikes(np.concatenate(pieces, axis=0), n_target, spike_rng)
+    prepared = []
     cursor = 0
     #Walk the routes and their activity blocks together
     for route, block in zip(routes, pieces):
         #unpack the activity block and store for later in route
         n = len(block) #number of samples
         counts = spikes[cursor:cursor + n].T #Slice this route's spikes and transpose them to (cells, samples).
-        route["n_spikes"] = counts.sum(axis=1).astype(int) #spike counts
-        route["spike_idx"], route["spike_valid"] = _spike_index(counts)
-        route["xy"] = plane_chart(positions[route["index"]], route["n_true"])
-        route["lags"] = _lag_matrix(route["slices"], n_shuffles, shift_rng)
+        spike_idx, spike_valid = _spike_index(counts)
+        lags = _lag_matrix(route["slices"], n_shuffles, shift_rng)
+        shifted_idx = _shift_index(spike_idx, spike_valid, route["slices"], lags)
+        prepared.append(dict(
+            n_spikes=counts.sum(axis=1).astype(int), #spike counts
+            spike_idx=spike_idx,
+            spike_valid=spike_valid,
+            shifted_idx=shifted_idx,
+            shifted_valid=np.broadcast_to(spike_valid, shifted_idx.shape),
+            spikes=spikes,
+        ))
         cursor += n
+    return prepared
 
-    #allocate empty scoring tables
-    n_cells = activity.shape[1]
-    n_routes = len(routes)
-    n_spacings = len(spacings)
-    real_ll = np.full((n_spacings, n_routes, n_cells), -np.inf)
-    shuf_ll = np.full((int(n_shuffles), n_spacings, n_routes, n_cells), -np.inf)
-    real_orient = np.full((n_spacings, n_routes, n_cells), -1, dtype=int)
-    real_phase = np.full((n_spacings, n_routes, n_cells), -1, dtype=int)
-    fired = np.stack([route["n_spikes"] for route in routes], axis=0) > 0
 
+def _score_pair(xy, spacing, orientations, n_phase, arms, n_shuffles):
+    """Best orientation and phase for one route at one spacing, every arm."""
+    n_cells = arms[0]["n_spikes"].shape[0]
     chunk = 16 #number of shuffles scored at one time.
-    #Search each route for the best spacing, orientation, and phase.
-    for r_i, route in enumerate(routes):
-        n_spikes = route["n_spikes"].astype(float) #spike counts
-        shifted_idx = _shift_index(
-            route["spike_idx"], route["spike_valid"], route["slices"], route["lags"])
-        shifted_valid = np.broadcast_to(
-            route["spike_valid"], shifted_idx.shape)
-        
-        #Try each spacing.
-        for s_i, spacing in enumerate(spacings):
-            best_real = np.full(n_cells, -np.inf)
-            best_phase = np.full(n_cells, -1, dtype=int)
-            best_orient = np.full(n_cells, -1, dtype=int)
-            best_shuf = np.full((int(n_shuffles), n_cells), -np.inf)
-            
-            #Try each orientation.
-            for o_i, orientation in enumerate(orientations):
-                #Build all phases for this orientation.
-                g = lattice_g(route["xy"], spacing, orientation, n_phase=n_phase)
-                log_g = np.log(g)
-                #Sum the lattice fields at every point to get occupancy.
-                occupancy = g.sum(axis=1)
-                #Find the best phase for this orientation
-                ll, phase = _best_phase(
-                    n_spikes,
-                    occupancy,
-                    _spike_term(log_g, route["spike_idx"], route["spike_valid"]),
+    best = []
+    for _arm in arms:
+        best.append(dict(
+            real=np.full(n_cells, -np.inf),
+            phase=np.full(n_cells, -1, dtype=int),
+            orient=np.full(n_cells, -1, dtype=int),
+            shuf=np.full((int(n_shuffles), n_cells), -np.inf),
+        ))
+    #Try each orientation. The lattice field is shared by every arm.
+    for o_i, orientation in enumerate(orientations):
+        #Build all phases for this orientation.
+        g = lattice_g(xy, spacing, orientation, n_phase=n_phase)
+        log_g = np.log(g)
+        #Sum the lattice fields at every point to get occupancy.
+        occupancy = g.sum(axis=1)
+        for arm, slot in zip(arms, best):
+            n_spikes = arm["n_spikes"].astype(float) #spike counts
+            #Find the best phase for this orientation
+            ll, phase = _best_phase(
+                n_spikes, occupancy,
+                _spike_term(log_g, arm["spike_idx"], arm["spike_valid"]),
+            )
+            # better is true for each cell whose likelihood beat the best orientation so far
+            better = ll > slot["real"]
+            slot["real"][better] = ll[better]
+            slot["phase"][better] = phase[better]
+            slot["orient"][better] = o_i
+            #Calculate LL for each shuffle.
+            for start in range(0, int(n_shuffles), chunk):
+                stop = min(start + chunk, int(n_shuffles))
+                terms = _spike_term(
+                    log_g, arm["shifted_idx"][start:stop],
+                    arm["shifted_valid"][start:stop],
                 )
+                #Find the best phase for each shuffle.
+                ll_s = _best_phase_shifts(n_spikes, occupancy, terms)
+                block = slot["shuf"][start:stop]
                 # better is true for each cell whose likelihood beat the best orientation so far
-                better = ll > best_real
-                
-                best_real[better] = ll[better]
-                best_phase[better] = phase[better]
-                best_orient[better] = o_i
-                
-                #Calculate LL for each shuffle.
-                for start in range(0, int(n_shuffles), chunk):
-                    stop = min(start + chunk, int(n_shuffles))
-                    terms = _spike_term(
-                        log_g, shifted_idx[start:stop], shifted_valid[start:stop])
-                    
-                    #Find the best phase for each shuffle.
-                    ll_s = _best_phase_shifts(n_spikes, occupancy, terms)
-                    block = best_shuf[start:stop]
-                    # better is true for each cell whose likelihood beat the best orientation so far
-                    better_s = ll_s > block
-                    block[better_s] = ll_s[better_s]
-            
-            #copy the best that survived into next spacing
-            real_ll[s_i, r_i] = best_real
-            shuf_ll[:, s_i, r_i] = best_shuf
-            real_orient[s_i, r_i] = best_orient
-            real_phase[s_i, r_i] = best_phase
+                better_s = ll_s > block
+                block[better_s] = ll_s[better_s]
+    return [
+        (slot["real"], slot["shuf"], slot["orient"], slot["phase"]) for slot in best
+    ]
 
+
+def _pair_task(r_i, s_i, xy, spacing, orientations, n_phase, arms_here, n_shuffles):
+    return r_i, s_i, _score_pair(xy, spacing, orientations, n_phase, arms_here, n_shuffles)
+
+
+def _assemble(routes, spacings, orientations, n_target, n_shuffles, n_cells,
+              real_ll, shuf_ll, real_orient, real_phase, fired, spikes, return_spikes):
     #Turns the per-route log-likelihood tables into one spacing choice and one grid-fit score per cell
     z_route = _z_against(real_ll, shuf_ll)
     if z_route.shape != real_ll.shape:
@@ -430,14 +426,14 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
     #pick one spacing
     mean_z = _mean_over_fired(z_route, fired)
     spacing_choice = np.argmax(mean_z, axis=0)
-    
     #score the data on this scoring
     real_totals = real_ll.sum(axis=1)
     shuf_totals = shuf_ll.sum(axis=2)
     cell_total = real_totals[spacing_choice, np.arange(n_cells)]
-    null_at_choice = _take(shuf_totals, np.broadcast_to(spacing_choice, (int(n_shuffles), n_cells)))
+    null_at_choice = _take(
+        shuf_totals, np.broadcast_to(spacing_choice, (int(n_shuffles), n_cells)),
+    )
     grid_fit = _z_against(cell_total, null_at_choice)
-
     #Build a null that also gets to pick its spacing
     z_loo_route = _loo_z(shuf_ll)
     mean_loo = _mean_over_fired(z_loo_route, fired)
@@ -468,9 +464,8 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
         if not silent:
             active.append(cells[-1])
             null_medians.append(cells[-1]["null_median"])
-    return dict(
+    out = dict(
         cells=cells,
-        spikes=spikes,
         routes=[int(route["route"]) for route in routes],
         spacings=spacings,
         orientations=orientations,
@@ -488,6 +483,90 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
             if active else float("nan")
         ),
     )
+    if return_spikes:
+        out["spikes"] = spikes
+    return out
+
+
+def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
+               seed, n_target=N_TARGET, n_shuffles=N_SHUFFLES,
+               spacings=None, orientations=None, n_phase=N_PHASE,
+               arms=None, return_spikes=False, n_jobs=None):
+    """
+    Fits one spacing per cell. It picks one spacing for the cell
+    and lets orientation and phase be chosen separately on every route.
+
+    arms is an optional list of (activity, seed) scored in the same pass.
+    The lattice field is built once and reused; each arm keeps its own draws.
+    """
+    #setup everything
+    positions = np.asarray(positions, dtype=float)
+    jobs = [(np.asarray(activity, dtype=float), seed)]
+    if arms:
+        jobs.extend((np.asarray(item[0], dtype=float), item[1]) for item in arms)
+    routes = _routes(flight_of, flight_table, route_table)
+    if spacings is None:
+        spacings = spacing_values()
+    if orientations is None:
+        orientations = orientation_values()
+    spacings = np.asarray(spacings, dtype=float)
+    orientations = np.asarray(orientations, dtype=float)
+    for route in routes:
+        route["xy"] = plane_chart(positions[route["index"]], route["n_true"])
+    # Every arm's draws happen before the search, in the order the arms are given.
+    prepared = [
+        _prepare_arm(act, arm_seed, routes, positions, n_target, n_shuffles)
+        for act, arm_seed in jobs
+    ]
+    #allocate empty scoring tables
+    n_cells = jobs[0][0].shape[1]
+    n_routes = len(routes)
+    n_spacings = len(spacings)
+    tables = []
+    for arm_routes in prepared:
+        tables.append(dict(
+            real_ll=np.full((n_spacings, n_routes, n_cells), -np.inf),
+            shuf_ll=np.full((int(n_shuffles), n_spacings, n_routes, n_cells), -np.inf),
+            real_orient=np.full((n_spacings, n_routes, n_cells), -1, dtype=int),
+            real_phase=np.full((n_spacings, n_routes, n_cells), -1, dtype=int),
+            fired=np.stack([item["n_spikes"] for item in arm_routes], axis=0) > 0,
+            spikes=arm_routes[0]["spikes"] if arm_routes else None,
+            n_spikes=arm_routes,
+        ))
+
+    #Search each route for the best spacing, orientation, and phase.
+    pairs = []
+    for r_i in range(n_routes):
+        for s_i, spacing in enumerate(spacings):
+            pairs.append((
+                r_i, s_i, routes[r_i]["xy"], float(spacing), orientations, n_phase,
+                [arm[r_i] for arm in prepared], n_shuffles,
+            ))
+
+    workers = _default_jobs() if n_jobs is None else int(n_jobs)
+    if workers <= 1 or len(pairs) <= 1:
+        scored = [_pair_task(*item) for item in pairs]
+    else:
+        from joblib import Parallel, delayed
+        scored = Parallel(n_jobs=workers)(delayed(_pair_task)(*item) for item in pairs)
+
+    for r_i, s_i, arm_scores in scored:
+        for table, (best_real, best_shuf, best_orient, best_phase) in zip(tables, arm_scores):
+            table["real_ll"][s_i, r_i] = best_real
+            table["shuf_ll"][:, s_i, r_i] = best_shuf
+            table["real_orient"][s_i, r_i] = best_orient
+            table["real_phase"][s_i, r_i] = best_phase
+
+    results = []
+    for table, arm_routes in zip(tables, prepared):
+        for route, item in zip(routes, arm_routes):
+            route["n_spikes"] = item["n_spikes"]
+        results.append(_assemble(
+            routes, spacings, orientations, n_target, n_shuffles, n_cells,
+            table["real_ll"], table["shuf_ll"], table["real_orient"], table["real_phase"],
+            table["fired"], arm_routes[0]["spikes"], return_spikes,
+        ))
+    return results[0] if arms is None else results
 
 
 def qy_fit(traj, field_pos, field_act, stride, **kwargs):
@@ -502,7 +581,7 @@ def qy_fit(traj, field_pos, field_act, stride, **kwargs):
 
 def repeat_phase_misalignment(theta, flight_table, n_sheet, bump_spacing_cells):
     """Phase difference between repeats of one stored path, in grid periods.
-     Measures how far the network's internal phase drifts when the same outbound 
+     Measures how far the network's internal phase drifts when the same
      path is flown again.
     """
     theta = np.asarray(theta, dtype=float) #internal phase of the network
@@ -510,17 +589,15 @@ def repeat_phase_misalignment(theta, flight_table, n_sheet, bump_spacing_cells):
     grouped = {}
     #loop thorugh flight table when they start and end
     for row in flight_table:
-        if row.get("direction", "out") != "out": #only look at outbound flights
-            continue
-        grouped.setdefault(int(row.get("base_route", row["route"])), []).append(row)
-    
+        grouped.setdefault(int(row["route"]), []).append(row)
+
     rows = []
     #walks thorugh stored paths. Compare first pass with later passes.
-    for base, flights in grouped.items():
+    for route_id, flights in grouped.items():
         flights = sorted(flights, key=lambda item: int(item["t0"]))
         ref = theta[int(flights[0]["t0"]):int(flights[0]["t1"])]
         diffs = []
-        
+
         #Later passes of the pass , skip the first one.
         for row in flights[1:]:
             cur = theta[int(row["t0"]):int(row["t1"])]
@@ -531,5 +608,5 @@ def repeat_phase_misalignment(theta, flight_table, n_sheet, bump_spacing_cells):
             rms = float(np.sqrt(np.mean(np.square(stacked)))) #root-mean-square of the phase differences
         else:
             rms = 0.0
-        rows.append(dict(base_route=int(base), n_repeats=len(flights), rms_periods=rms))
+        rows.append(dict(route=int(route_id), n_repeats=len(flights), rms_periods=rms))
     return rows
