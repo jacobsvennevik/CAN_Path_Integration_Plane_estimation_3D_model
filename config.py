@@ -25,9 +25,6 @@ class NetworkConfig:
     tau:                float = 5.0  # neural time constant; dt/tau ≤ 0.125 at tau=2  NOTE: tau is 5.0 now, not 2
     velocity_gain:      float = 2.626  # bump speed vs commanded speed; Optuna searches this in the 2-D sweep
 
-    # Field spacing on the sheet (cells), not Fourier wavelength.
-    bump_spacing_cells: float = 19.8
-
     # Undriven settle. None is an error: experiments set this. There is no formula.
     # Frozen networks (trial 69) set this explicitly; do not default to 4000.
     settle_steps:       int | None = None
@@ -64,7 +61,7 @@ class ExperimentConfig:
     n_steps:          int   = 3000 #Defult timesteps
     seed:             int   = 0
     grid_spacing:     float = 0.48    # metres per bump spacing 
-    target_speed_rad_per_time: float = 0.002  # desired bump speed
+    target_speed_rad_per_time: float = 0.004  # desired bump speed
 
     omega_std:        float = 0.03
     #NOTE: How many of this is needed, look at this one more time then
@@ -95,12 +92,11 @@ class RunConfig:
 
     @property
     def scale(self) -> float:
-        """Metres to radians, from the sheet size and the field spacing."""
-        n = self.network.n
-        return float(
-            2 * np.pi * self.network.bump_spacing_cells
-            / (n * self.experiment.grid_spacing)
-        )
+        """Radians of bump travel per metre.
+
+        One kernel wavelength (lambda_net) equals one grid spacing.
+        """
+        return float(self.network.lambda_net / self.experiment.grid_spacing)
 
 def world_to_normalized(world_pos, env_size):
     """Map physical position (metres, within ±env_size/2) to the [-1,1] cube

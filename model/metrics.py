@@ -1,4 +1,4 @@
-"""Torus geometry: wrapped distances, unwrap, field spacing."""
+"""Torus geometry: wrapped distances and unwrap."""
 import numpy as np
 
 
@@ -20,17 +20,11 @@ def unwrap_torus(theta, period=2 * np.pi):
     )
 
 
-def field_spacing_rad(n, bump_spacing_cells):
-    """One hexagonal field spacing, in radians on the torus."""
-    return float(bump_spacing_cells) * 2.0 * np.pi / float(n)
-
-
-def torus_error_periods(decoded, truth, n, bump_spacing_cells):
-    """Wrapped Euclidean error as a fraction of one field spacing."""
-    err = np.linalg.norm(
+def torus_error(decoded, truth):
+    """Wrapped Euclidean error, in radians, at each step."""
+    return np.linalg.norm(
         wrapped_angle_diff(np.asarray(decoded), np.asarray(truth)), axis=1
     )
-    return err / field_spacing_rad(n, bump_spacing_cells)
 
 
 def tracking_score(decoded, truth):

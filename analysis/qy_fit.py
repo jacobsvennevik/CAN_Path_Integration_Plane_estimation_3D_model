@@ -3,7 +3,7 @@ import os
 import numpy as np
 from scipy.special import xlogy
 
-from model.metrics import field_spacing_rad, wrapped_angle_diff
+from model.metrics import wrapped_angle_diff
 from model.path_integration import frame
 
 FLOOR = 0.01
@@ -579,13 +579,13 @@ def qy_fit(traj, field_pos, field_act, stride, **kwargs):
     )
 
 
-def repeat_phase_misalignment(theta, flight_table, n_sheet, bump_spacing_cells):
-    """Phase difference between repeats of one stored path, in grid periods.
-     Measures how far the network's internal phase drifts when the same
-     path is flown again.
+def repeat_phase_misalignment(theta, flight_table):
+    """Phase difference between repeats of one stored path, in radians.
+
+    Measures how far the network's internal phase drifts when the same
+    path is flown again.
     """
     theta = np.asarray(theta, dtype=float) #internal phase of the network
-    period = field_spacing_rad(n_sheet, bump_spacing_cells)
     grouped = {}
     #loop thorugh flight table when they start and end
     for row in flight_table:
@@ -602,11 +602,11 @@ def repeat_phase_misalignment(theta, flight_table, n_sheet, bump_spacing_cells):
         for row in flights[1:]:
             cur = theta[int(row["t0"]):int(row["t1"])]
             n = min(len(ref), len(cur))
-            diffs.append(wrapped_angle_diff(cur[:n], ref[:n]) / period)
+            diffs.append(wrapped_angle_diff(cur[:n], ref[:n]))
         if diffs:
             stacked = np.concatenate(diffs, axis=0)
             rms = float(np.sqrt(np.mean(np.square(stacked)))) #root-mean-square of the phase differences
         else:
             rms = 0.0
-        rows.append(dict(route=int(route_id), n_repeats=len(flights), rms_periods=rms))
+        rows.append(dict(route=int(route_id), n_repeats=len(flights), rms_rad=rms))
     return rows

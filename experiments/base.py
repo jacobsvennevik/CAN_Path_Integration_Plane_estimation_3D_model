@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import numpy as np
 
-from model.metrics import torus_error_periods, tracking_score
+from model.metrics import torus_error, tracking_score
 from model.path_integration import PathIntegrator, build_rotation_matrix
 from config import world_to_flat_bins
 from model.network.QAN3D import Torus3DQAN
@@ -154,7 +154,7 @@ class ExperimentResult:
     theta_hist:        np.ndarray
     n_hat_hist:        np.ndarray
     n_held_hist:       np.ndarray  # sample-and-hold normal that actually drives E
-    norm_error:        np.ndarray
+    error_rad:         np.ndarray
     tracking_score:    float
     params:            dict
     n_sheet:           int
@@ -306,8 +306,7 @@ class BaseExperiment:
         n_hat_hist = np.asarray(integrator.history["n_hat"])
         n_held_hist = np.asarray(integrator.history["n_held"])
         n_sheet = int(integrator.backend.n)
-        bump_sp = float(self.config.network.bump_spacing_cells)
-        torus_err = torus_error_periods(theta_hist, torus_gt, n_sheet, bump_sp)
+        torus_err = torus_error(theta_hist, torus_gt)
         score = tracking_score(theta_hist, torus_gt)
 
         active_mask = None
@@ -332,7 +331,7 @@ class BaseExperiment:
             theta_hist=theta_hist,
             n_hat_hist=n_hat_hist,
             n_held_hist=n_held_hist,
-            norm_error=torus_err,
+            error_rad=torus_err,
             tracking_score=float(score),
             params=params,
             n_sheet=n_sheet,
