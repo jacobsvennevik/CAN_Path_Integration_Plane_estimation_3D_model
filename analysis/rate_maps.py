@@ -9,11 +9,17 @@ from . import gongyu_scoring as gy
 
 SMOOTH_SIGMA = AnalysisConfig.smooth_sigma
 
+def visited_bins(world_pos, env_size, bins, ndim=2):
+    """How many rate-map bins the trajectory enters, and how many bins the grid has."""
+    flat = world_to_flat_bins(world_pos, env_size, bins, ndim=ndim)
+    counts = np.bincount(flat, minlength=int(bins) ** int(ndim))
+    return int((counts > 0).sum()), int(counts.size)
+
+
 def occupancy_fraction(world_pos, env_size, bins, ndim=2):
     """Fraction of bins visited by a trajectory, from the same binning as the rate maps."""
-    flat = world_to_flat_bins(world_pos, env_size, bins, ndim=ndim)
-    counts = np.bincount(flat, minlength=bins ** ndim)
-    return float((counts > 0).mean())
+    visited, total = visited_bins(world_pos, env_size, bins, ndim=ndim)
+    return float(visited / total) if total else float("nan")
 
 
 def _spatial_info(p: np.ndarray, f: np.ndarray) -> np.ndarray:
