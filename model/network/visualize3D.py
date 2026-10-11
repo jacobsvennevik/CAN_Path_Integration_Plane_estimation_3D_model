@@ -74,12 +74,26 @@ def _break_periodic_jumps_2d(x, y, threshold=np.pi):
     return x_plot, y_plot
 
 
+def _fold_onto_period(theta, period=2 * np.pi):
+    """Fold angles into [0, period) with wrapped_angle_diff.
+
+    The tracker accumulates an unwrapped phase. Ground truth is already on
+    one period. Both have to sit in the same interval before a torus plot.
+    """
+    theta = np.asarray(theta, dtype=float)
+    period = np.asarray(period, dtype=float)
+    return np.mod(wrapped_angle_diff(theta, 0.0, period=period), period)
+
+
 def visualize_trajectory_projections(traj, decoded=None, title="Torus trajectory",
                                      period=None):
     """
     Plot the different slices, works like the rest of the code fixing one of the dimensions
     """
-    traj = np.asarray(traj, float)
+    sheet = 2 * np.pi if period is None else period
+    traj = _fold_onto_period(traj, sheet)
+    if decoded is not None:
+        decoded = _fold_onto_period(decoded, sheet)
     d = traj.shape[1]
     specs = slice_specs(d)
     n_panels = max(len(specs), 1)
@@ -102,7 +116,6 @@ def visualize_trajectory_projections(traj, decoded=None, title="Torus trajectory
         )
         # Optional decoded trajectory, used when we have the grid cell firing decoded positions and maps them on the trajectories
         if decoded is not None:
-            decoded = np.asarray(decoded, float)
             # To help visualisation when the plot reaches a periodic boundary
             x_dec, y_dec = _break_periodic_jumps_2d(
                 decoded[:, d0], decoded[:, d1], **kw)
@@ -124,33 +137,56 @@ def visualize_trajectory_projections(traj, decoded=None, title="Torus trajectory
 def plot_pi_error(gt, decoded, title="Path-integration error"):
     """torus positions in RADIANS"""
     gt, decoded = np.asarray(gt), np.asarray(decoded)
-    if gt.min() < -1e-6 or decoded.min() < -1e-6:
+    if max(np.max(np.abs(gt)), np.max(np.abs(decoded))) < 1.5:
         print("WARNING: input looks like metres, not radians.")
 
-    err = np.linalg.norm(wrapped_angle_diff(decoded, gt), axis=1)          
+    signed = wrapped_angle_diff(decoded, gt)
+    err = np.linalg.norm(signed, axis=1)
     true_step = wrapped_angle_diff(gt[1:],      gt[:-1]).ravel()
     dec_step  = wrapped_angle_diff(decoded[1:], decoded[:-1]).ravel()
     integration_gain = float((true_step @ dec_step) / (true_step @ true_step + 1e-12))  # LS slope thru origin
 
-    fig, ax = plt.subplots(1, 3, figsize=(15, 4))
-    ax[0].plot(err, color="#d6604d", lw=0.8)
+    fig, ax = plt.subplots(2, 2, figsize=(12, 7))
+    ax = ax.ravel()
+    ax[0].plot(err, color="#d6604d", lw=0.4, alpha=0.45)
+    win = max(1, len(err) // 200)
+    if win > 1:
+        smooth = np.convolve(err, np.ones(win) / win, mode="valid")
+        ax[0].plot(np.arange(win - 1, len(err)), smooth, color="#2166ac", lw=1.4,
+                   label=f"mean over {win} steps")
+        ax[0].legend(fontsize=8)
     ax[0].set(title="error over time", xlabel="timestep", ylabel="error (rad)")
 
-    ax[1].scatter(true_step, dec_step, s=2, alpha=0.12, color="#2166ac")
+    # Unwrapped, so a slow gain error stays a ramp. The wrapped error above
+    # folds that ramp into a sawtooth and can look periodic.
+    accumulated = unwrap_torus(decoded) - unwrap_torus(gt)
+    for d in range(accumulated.shape[1]):
+        series = accumulated[:, d]
+        t = np.arange(len(series))
+        if win > 1:
+            series = np.convolve(series, np.ones(win) / win, mode="valid")
+            t = np.arange(win - 1, len(accumulated))
+        ax[1].plot(t, series, lw=1.0, label=f"θ{d + 1}")
+    ax[1].axhline(0.0, color="k", lw=0.6)
+    ax[1].set(title="accumulated phase error", xlabel="timestep",
+              ylabel="unwrapped error (rad)")
+    ax[1].legend(fontsize=8)
+
+    ax[2].scatter(true_step, dec_step, s=2, alpha=0.12, color="#2166ac")
     lim = np.abs(true_step).max() * 1.1
     xs = np.linspace(-lim, lim, 50)
-    ax[1].plot(xs, xs, "k--", lw=1, label="y = x (faithful)")
-    ax[1].plot(xs, integration_gain*xs, "r-", lw=1, label=f"fit slope = {integration_gain:.3f}")
+    ax[2].plot(xs, xs, "k--", lw=1, label="y = x (faithful)")
+    ax[2].plot(xs, integration_gain*xs, "r-", lw=1, label=f"fit slope = {integration_gain:.3f}")
     # binned mean reveals the SHAPE through decoder jitter (this is the tanh test)
     nb = 15; edges = np.linspace(-lim, lim, nb+1); ctr = 0.5*(edges[:-1]+edges[1:])
     idx = np.clip(np.digitize(true_step, edges)-1, 0, nb-1)
     binned = np.array([dec_step[idx==k].mean() if (idx==k).any() else np.nan for k in range(nb)])
-    ax[1].plot(ctr, binned, "o-", color="#b2182b", ms=3, lw=1, label="binned mean")
-    ax[1].set(title="per-axis decoded vs true phase-step",
-              xlabel="true delta phase (rad/step)", ylabel="decoded delta phase (rad/step)"); ax[1].legend()
+    ax[2].plot(ctr, binned, "o-", color="#b2182b", ms=3, lw=1, label="binned mean")
+    ax[2].set(title="per-axis decoded vs true phase-step",
+              xlabel="true delta phase (rad/step)", ylabel="decoded delta phase (rad/step)"); ax[2].legend()
 
-    ax[2].hist(err, bins=50, color="#d6604d", alpha=0.8)
-    ax[2].set(title="error distribution", xlabel="error (rad)")
+    ax[3].hist(err, bins=50, color="#d6604d", alpha=0.8)
+    ax[3].set(title="error distribution", xlabel="error (rad)")
 
     gt_speed = np.linalg.norm(wrapped_angle_diff(gt[1:], gt[:-1]), axis=1)
     norm_made = float(np.mean(err[1:] / (np.cumsum(gt_speed) + 1e-9)))
