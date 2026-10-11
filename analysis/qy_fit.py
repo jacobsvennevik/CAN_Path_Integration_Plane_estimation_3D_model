@@ -1,6 +1,7 @@
 """Qi and Yartsev single-cell lattice fit"""
 import os
 import numpy as np
+from scipy import sparse  
 from scipy.special import xlogy
 
 from model.metrics import wrapped_angle_diff
@@ -240,18 +241,19 @@ def _shift_index(idx, valid, slices, lag_rows):
     return shifted
 
 
-def _spike_term(log_g, idx, valid):
-    """Adds up log g at every spike time."""
-    n_phase = log_g.shape[0]
-    if idx.shape[-1] == 0:
-        return np.zeros(idx.shape[:-1] + (n_phase,), dtype=float)
-    lead = idx.shape[:-1]
-    flat_idx = np.where(valid, idx, 0).reshape(-1, idx.shape[-1])
-    flat_valid = np.reshape(valid, (-1, idx.shape[-1]))
-    gathered = log_g[:, flat_idx]
-    gathered = np.where(flat_valid[None, :, :], gathered, 0.0)
-    terms = gathered.sum(axis=-1)
-    return np.moveaxis(terms, 0, -1).reshape(lead + (n_phase,))
+
+def _count_matrix(idx, valid, n_samples):
+    """Spike counts as a table, with one row per spike train, one column per sample.
+    """
+    n_rows = int(np.prod(idx.shape[:-1]))  #one row per cell, or per shuffle x cell
+    valid = np.broadcast_to(valid, idx.shape).reshape(n_rows, idx.shape[-1])
+    idx = idx.reshape(n_rows, idx.shape[-1])
+    rows = np.repeat(np.arange(n_rows), valid.sum(axis=1))  #row of every spike
+    cols = idx[valid]  #sample of every spike
+    #two spikes in the same row and sample are added up (count 2)
+    return sparse.csr_matrix((np.ones(len(cols)), (rows, cols)),
+                             shape=(n_rows, int(n_samples)))
+
 
 
 def _best_phase(n_spikes, occupancy, spike_term):
@@ -369,20 +371,17 @@ def _prepare_spikes(activity, seed, routes, n_target, n_shuffles):
         shifted_idx = _shift_index(spike_idx, spike_valid, route["slices"], lags)
         prepared.append(dict(
             n_spikes=counts.sum(axis=1).astype(int), #spike counts
-            spike_idx=spike_idx,
-            spike_valid=spike_valid,
-            shifted_idx=shifted_idx,
-            shifted_valid=np.broadcast_to(spike_valid, shifted_idx.shape),
-            spikes=spikes,
+            real=_count_matrix(spike_idx, spike_valid, n), #rows: cells
+            shuffled=_count_matrix(shifted_idx, spike_valid, n), #rows: shuffle 0 cells, shuffle 1 cells, xxx
         ))
         cursor += n
-    return prepared
+    return prepared, spikes 
 
 
 def _score_pair(xy, spacing, orientations, n_phase, drawn, n_shuffles):
     """Best orientation and phase for one route at one spacing."""
     n_cells = drawn["n_spikes"].shape[0]
-    chunk = 16 #number of shuffles scored at one time.
+   
     best = dict(
         real=np.full(n_cells, -np.inf),
         phase=np.full(n_cells, -1, dtype=int),
@@ -393,33 +392,28 @@ def _score_pair(xy, spacing, orientations, n_phase, drawn, n_shuffles):
     for o_i, orientation in enumerate(orientations):
         #Build all phases for this orientation.
         g = lattice_g(xy, spacing, orientation, n_phase=n_phase)
-        log_g = np.log(g)
+        #log g turned to one row per sample, one column per phase
+        log_g = np.ascontiguousarray(np.log(g).T)
         #Sum the lattice fields at every point to get occupancy.
         occupancy = g.sum(axis=1)
         n_spikes = drawn["n_spikes"].astype(float) #spike counts
         #Find the best phase for this orientation
-        ll, phase = _best_phase(
-            n_spikes, occupancy,
-            _spike_term(log_g, drawn["spike_idx"], drawn["spike_valid"]),
-        )
+        # CHANGED: spike term = count table @ log g (was _spike_term)
+        ll, phase = _best_phase(n_spikes, occupancy, drawn["real"] @ log_g)
         # better is true for each cell whose likelihood beat the best orientation so far
         better = ll > best["real"]
         best["real"][better] = ll[better]
         best["phase"][better] = phase[better]
         best["orient"][better] = o_i
-        #Calculate LL for each shuffle.
-        for start in range(0, int(n_shuffles), chunk):
-            stop = min(start + chunk, int(n_shuffles))
-            terms = _spike_term(
-                log_g, drawn["shifted_idx"][start:stop],
-                drawn["shifted_valid"][start:stop],
-            )
-            #Find the best phase for each shuffle.
-            ll_s = _best_phase_shifts(n_spikes, occupancy, terms)
-            block = best["shuf"][start:stop]
-            # better is true for each cell whose likelihood beat the best orientation so far
-            better_s = ll_s > block
-            block[better_s] = ll_s[better_s]
+
+        #Calculate LL for each shuffle 
+        terms = (drawn["shuffled"] #rows: shuffle 0 cells, shuffle 1 cells, xxx
+                 @ log_g).reshape(int(n_shuffles), n_cells, -1)
+        #Find the best phase for each shuffle.
+        ll_s = _best_phase_shifts(n_spikes, occupancy, terms)
+        # better is true for each shuffle whose likelihood beat the best orientation so far
+        better_s = ll_s > best["shuf"]
+        best["shuf"][better_s] = ll_s[better_s]
     return best["real"], best["shuf"], best["orient"], best["phase"]
 
 
@@ -530,7 +524,7 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
         route["xy"] = plane_chart(
             positions[route["index"]], route["n_fit"], basis=route["basis"],
         )
-    drawn = _prepare_spikes(activity, seed, routes, n_target, n_shuffles)
+    drawn, spikes = _prepare_spikes(activity, seed, routes, n_target, n_shuffles)  # CHANGED: spikes returned separately
     # Shuffle scores are reduced one route at a time. The full
     # (shuffle, spacing, route, cell) tensor is not stored.
     n_cells = activity.shape[1]
@@ -579,7 +573,7 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
         routes, spacings, orientations, n_target, n_shuffles, n_cells,
         real_ll, z_route, shuf_totals, mean_loo,
         real_orient, real_phase,
-        fired, drawn[0]["spikes"], return_spikes,
+        fired, spikes, return_spikes,  # CHANGED: was drawn[0]["spikes"]
     )
 
 

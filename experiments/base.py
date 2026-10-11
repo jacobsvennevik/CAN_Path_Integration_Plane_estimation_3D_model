@@ -220,10 +220,8 @@ class BaseExperiment:
     def _integrator(self, plane):
         N_neurons = self.qan.cans[0].S.shape[0]
         decode_chunk = max(64, int(256e6 / (4 * N_neurons)))
-        kappa_v = plane.kappa_v
         return PathIntegrator(
             qan=self.qan,
-            kappa_v=kappa_v,
             scale=self.config.scale,
             decode_chunk=decode_chunk,
             kappa_w=plane.kappa_w,

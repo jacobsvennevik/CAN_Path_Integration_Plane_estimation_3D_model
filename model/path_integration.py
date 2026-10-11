@@ -96,14 +96,13 @@ class PathIntegrator:
     """
     Path integrator coupling the vMF plane filter with the T^d QAN.
     """
-    def __init__(self, qan, kappa_v=None, scale=1.0,
+    def __init__(self, qan, scale=1.0,
                  decode_chunk=4096, decode_radius=None, decode_seed_radius=None,
                  kappa_w=KAPPA_W_DEFAULT, kappa_sens=300.0,
                  tau_refresh=1, seed=0,
                  refresh_settle_steps=200, reset_prior_at_segment_start=False,
                  device=None):
         self.qan = qan
-        self.kappa_v = None if kappa_v is None else float(kappa_v)
         self.kappa_w = float(kappa_w)  # process-noise concentration for predict()
         self.kappa_sens = float(kappa_sens)
         self.tau_refresh = int(tau_refresh)
@@ -128,9 +127,6 @@ class PathIntegrator:
         self.ratemap_sums = None
         self.ratemap_counts = None
 
-    def _likelihood(self) -> float:
-        return self.kappa_sens if self.kappa_v is None else self.kappa_v
-
     def warmup(self, n_steps: int = 100):
         """Let the lattice settle, then lock the tracker on.
 
@@ -154,7 +150,7 @@ class PathIntegrator:
             return
         z = sample_vmf(n_ref, self.kappa_sens, self._rng)
         self._vmf_state = step_filter(
-            self._vmf_state, z, self._likelihood(), self.kappa_w)
+            self._vmf_state, z, self.kappa_sens, self.kappa_w)
 
     def default_refresh_mask(self, n_steps, timing="free", segment_starts=None):
         """Refresh schedule.

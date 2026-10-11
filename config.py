@@ -54,7 +54,6 @@ class NetworkConfig:
 @dataclass
 class PlaneConfig:
     """Estimator readout: vMF filter and how long the normal is held."""
-    kappa_v:         float | None = None  # None uses kappa_sens
     kappa_w:         float = 1e4
     kappa_sens:      float = 300.0
     tau_refresh:     int   = 1

@@ -49,58 +49,11 @@ class VonMisesFisherDistribution:
                 f"  kappa={self.kappa:.4f}\n)")
 
 
-def deterministic_sampling(mu, kappa, d=D):
-    """Algorithm 1, from kurz (2016) paper. 
-    Samples point whose vector average has exactly length A_d(κ)"""
-    # Initialize the sample matrix S
-    S = np.zeros((d, 2 * d - 1))
-    S[0, 0] = 1.0
-    # compute the target length the samples should integrete to
-    m1 = A_d(kappa, d)
-    #Solves for the one tilt angle a that makes the points own resultant length equal m1.
-    alpha = np.arccos(((2 * d - 1) * m1 - 1.0) / (2 * d - 2))
-    for i in range(1, d):
-        S[0, 2 * i - 1] = np.cos(alpha)
-        S[0, 2 * i] = np.cos(alpha)
-        S[i, 2 * i - 1] = np.sin(alpha)
-        S[i, 2 * i] = -np.sin(alpha)
-    # Rotate the samples to the desired direction.
-    M = np.zeros((d, d))
-    M[:, 0] = np.asarray(mu, dtype=float)
-    Q, R = np.linalg.qr(M)
-    if R[0, 0] < 0:
-        # sign check ensures you land on μ rather than −μ.
-        Q = -Q
-    return Q @ S
-
-
-def parameter_estimation(S, weights=None, d=D, tol=1e-12):
-    """ the inverse of sampling. Given a cloud of points fit the vMF."""
-    S = np.asarray(S, dtype=float)
-    n = S.shape[1]
-    w = np.full(n, 1.0 / n) if weights is None else np.asarray(weights, dtype=float)
-    # compute the mean of the samples
-    m = S @ w
-    r = float(np.linalg.norm(m))
-    if r < tol:
-        return None, 0.0
-    return m / r, A_d_inverse(r, d)
-
-
-def predict(estimate, kappa_w, a=None, d=D):
-    """the forgetting step. Advances the belief one step and lets confidence decay. This is the one approximation in the filter"""
-    #Step 1: scatter 5 representative points
-    S = deterministic_sampling(estimate.mu, estimate.kappa, d)
-    #Step 2: push each through the system function a_k.
-    if a is not None:
-        S = np.column_stack([a(S[:, i]) for i in range(S.shape[1])])
-    #Step 3: re-fit. A uniform state predicts to a uniform state, keeping the placeholder direction mu.
-    mu, kappa = parameter_estimation(S, d=d)
-    if mu is None:
-        #Return a uniform state if mu is none
-        return VonMisesFisherDistribution(estimate.mu, 0.0)
-    #Step 4: return the new estimate.
-    return VonMisesFisherDistribution(mu, A_d_inverse(A_d(kappa, d) * A_d(kappa_w, d), d))
+def predict(estimate, kappa_w, d=D):
+    """Identity system model: keep the direction, lower the confidence.
+    This is the filter's one approximation (moment matching)."""
+    return VonMisesFisherDistribution(
+        estimate.mu, A_d_inverse(A_d(estimate.kappa, d) * A_d(kappa_w, d), d))
 
 
 def update(prediction, measurement, kappa_v):
