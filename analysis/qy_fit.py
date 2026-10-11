@@ -341,7 +341,7 @@ def _take(values, choice):
 def _streams(seed):
     """Independent spike and shift generators"""
     if seed is None:
-        raise ValueError("seed is required and must differ per run and arm")
+        raise ValueError("seed is required and must differ per run")
     spike_seed, shift_seed = np.random.SeedSequence(int(seed)).spawn(2)
     return np.random.default_rng(spike_seed), np.random.default_rng(shift_seed)
 
@@ -350,8 +350,8 @@ def _default_jobs():
     return max(1, (os.cpu_count() or 1) - 1)
 
 
-def _prepare_arm(activity, seed, routes, positions, n_target, n_shuffles):
-    """Draw this arm's spikes and lags. Geometry (the chart) is shared."""
+def _prepare_spikes(activity, seed, routes, n_target, n_shuffles):
+    """Draw spikes and lags for this activity. Geometry (the chart) is shared."""
     spike_rng, shift_rng = _streams(seed)
     #concatenate all the activity traces for each route
     pieces = [activity[route["index"]] for route in routes]
@@ -379,57 +379,52 @@ def _prepare_arm(activity, seed, routes, positions, n_target, n_shuffles):
     return prepared
 
 
-def _score_pair(xy, spacing, orientations, n_phase, arms, n_shuffles):
-    """Best orientation and phase for one route at one spacing, every arm."""
-    n_cells = arms[0]["n_spikes"].shape[0]
+def _score_pair(xy, spacing, orientations, n_phase, drawn, n_shuffles):
+    """Best orientation and phase for one route at one spacing."""
+    n_cells = drawn["n_spikes"].shape[0]
     chunk = 16 #number of shuffles scored at one time.
-    best = []
-    for _arm in arms:
-        best.append(dict(
-            real=np.full(n_cells, -np.inf),
-            phase=np.full(n_cells, -1, dtype=int),
-            orient=np.full(n_cells, -1, dtype=int),
-            shuf=np.full((int(n_shuffles), n_cells), -np.inf),
-        ))
-    #Try each orientation. The lattice field is shared by every arm.
+    best = dict(
+        real=np.full(n_cells, -np.inf),
+        phase=np.full(n_cells, -1, dtype=int),
+        orient=np.full(n_cells, -1, dtype=int),
+        shuf=np.full((int(n_shuffles), n_cells), -np.inf),
+    )
+    #Try each orientation.
     for o_i, orientation in enumerate(orientations):
         #Build all phases for this orientation.
         g = lattice_g(xy, spacing, orientation, n_phase=n_phase)
         log_g = np.log(g)
         #Sum the lattice fields at every point to get occupancy.
         occupancy = g.sum(axis=1)
-        for arm, slot in zip(arms, best):
-            n_spikes = arm["n_spikes"].astype(float) #spike counts
-            #Find the best phase for this orientation
-            ll, phase = _best_phase(
-                n_spikes, occupancy,
-                _spike_term(log_g, arm["spike_idx"], arm["spike_valid"]),
+        n_spikes = drawn["n_spikes"].astype(float) #spike counts
+        #Find the best phase for this orientation
+        ll, phase = _best_phase(
+            n_spikes, occupancy,
+            _spike_term(log_g, drawn["spike_idx"], drawn["spike_valid"]),
+        )
+        # better is true for each cell whose likelihood beat the best orientation so far
+        better = ll > best["real"]
+        best["real"][better] = ll[better]
+        best["phase"][better] = phase[better]
+        best["orient"][better] = o_i
+        #Calculate LL for each shuffle.
+        for start in range(0, int(n_shuffles), chunk):
+            stop = min(start + chunk, int(n_shuffles))
+            terms = _spike_term(
+                log_g, drawn["shifted_idx"][start:stop],
+                drawn["shifted_valid"][start:stop],
             )
+            #Find the best phase for each shuffle.
+            ll_s = _best_phase_shifts(n_spikes, occupancy, terms)
+            block = best["shuf"][start:stop]
             # better is true for each cell whose likelihood beat the best orientation so far
-            better = ll > slot["real"]
-            slot["real"][better] = ll[better]
-            slot["phase"][better] = phase[better]
-            slot["orient"][better] = o_i
-            #Calculate LL for each shuffle.
-            for start in range(0, int(n_shuffles), chunk):
-                stop = min(start + chunk, int(n_shuffles))
-                terms = _spike_term(
-                    log_g, arm["shifted_idx"][start:stop],
-                    arm["shifted_valid"][start:stop],
-                )
-                #Find the best phase for each shuffle.
-                ll_s = _best_phase_shifts(n_spikes, occupancy, terms)
-                block = slot["shuf"][start:stop]
-                # better is true for each cell whose likelihood beat the best orientation so far
-                better_s = ll_s > block
-                block[better_s] = ll_s[better_s]
-    return [
-        (slot["real"], slot["shuf"], slot["orient"], slot["phase"]) for slot in best
-    ]
+            better_s = ll_s > block
+            block[better_s] = ll_s[better_s]
+    return best["real"], best["shuf"], best["orient"], best["phase"]
 
 
-def _pair_task(r_i, s_i, xy, spacing, orientations, n_phase, arms_here, n_shuffles):
-    return r_i, s_i, _score_pair(xy, spacing, orientations, n_phase, arms_here, n_shuffles)
+def _pair_task(r_i, s_i, xy, spacing, orientations, n_phase, drawn, n_shuffles):
+    return r_i, s_i, _score_pair(xy, spacing, orientations, n_phase, drawn, n_shuffles)
 
 
 def _weighted_mean(total, fired):
@@ -514,19 +509,14 @@ def _assemble(routes, spacings, orientations, n_target, n_shuffles, n_cells,
 def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
                seed, n_target=N_TARGET, n_shuffles=N_SHUFFLES,
                spacings=None, orientations=None, n_phase=N_PHASE,
-               arms=None, return_spikes=False, n_jobs=None):
+               return_spikes=False, n_jobs=None):
     """
     Fits one spacing per cell. It picks one spacing for the cell
     and lets orientation and phase be chosen separately on every route.
-
-    arms is an optional list of (activity, seed) scored in the same pass.
-    The lattice field is built once and reused; each arm keeps its own draws.
     """
     #setup everything
     positions = np.asarray(positions, dtype=float)
-    jobs = [(np.asarray(activity, dtype=float), seed)]
-    if arms:
-        jobs.extend((np.asarray(item[0], dtype=float), item[1]) for item in arms)
+    activity = np.asarray(activity, dtype=float)
     routes = _routes(flight_of, flight_table, route_table)
     if not routes:
         raise ValueError("no flights to fit")
@@ -540,30 +530,20 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
         route["xy"] = plane_chart(
             positions[route["index"]], route["n_fit"], basis=route["basis"],
         )
-    # Every arm's draws happen before the search, in the order the arms are given.
-    prepared = [
-        _prepare_arm(act, arm_seed, routes, positions, n_target, n_shuffles)
-        for act, arm_seed in jobs
-    ]
+    drawn = _prepare_spikes(activity, seed, routes, n_target, n_shuffles)
     # Shuffle scores are reduced one route at a time. The full
     # (shuffle, spacing, route, cell) tensor is not stored.
-    n_cells = jobs[0][0].shape[1]
+    n_cells = activity.shape[1]
     n_routes = len(routes)
     n_spacings = len(spacings)
     n_shuf = int(n_shuffles)
-    tables = []
-    for arm_routes in prepared:
-        tables.append(dict(
-            real_ll=np.full((n_spacings, n_routes, n_cells), -np.inf),
-            z_route=np.zeros((n_spacings, n_routes, n_cells)),
-            shuf_totals=np.zeros((n_shuf, n_spacings, n_cells)),
-            loo_weighted=np.zeros((n_shuf, n_spacings, n_cells)),
-            real_orient=np.full((n_spacings, n_routes, n_cells), -1, dtype=int),
-            real_phase=np.full((n_spacings, n_routes, n_cells), -1, dtype=int),
-            fired=np.stack([item["n_spikes"] for item in arm_routes], axis=0) > 0,
-            spikes=arm_routes[0]["spikes"] if arm_routes else None,
-            n_spikes=arm_routes,
-        ))
+    real_ll = np.full((n_spacings, n_routes, n_cells), -np.inf)
+    z_route = np.zeros((n_spacings, n_routes, n_cells))
+    shuf_totals = np.zeros((n_shuf, n_spacings, n_cells))
+    loo_weighted = np.zeros((n_shuf, n_spacings, n_cells))
+    real_orient = np.full((n_spacings, n_routes, n_cells), -1, dtype=int)
+    real_phase = np.full((n_spacings, n_routes, n_cells), -1, dtype=int)
+    fired = np.stack([item["n_spikes"] for item in drawn], axis=0) > 0
 
     workers = _default_jobs() if n_jobs is None else int(n_jobs)
     parallel = None
@@ -575,7 +555,7 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
     for r_i, route in enumerate(routes):
         pairs = [
             (r_i, s_i, route["xy"], float(spacing), orientations, n_phase,
-             [arm[r_i] for arm in prepared], n_shuffles)
+             drawn[r_i], n_shuffles)
             for s_i, spacing in enumerate(spacings)
         ]
         if parallel is None or len(pairs) <= 1:
@@ -583,37 +563,24 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
         else:
             scored = parallel(delayed(_pair_task)(*item) for item in pairs)
 
-        reals = [np.empty((n_spacings, n_cells)) for _ in tables]
-        shufs = [np.empty((n_shuf, n_spacings, n_cells)) for _ in tables]
-        orients = [np.empty((n_spacings, n_cells), dtype=int) for _ in tables]
-        phases = [np.empty((n_spacings, n_cells), dtype=int) for _ in tables]
-        for _, s_i, arm_scores in scored:
-            for arm_i, (best_real, best_shuf, best_orient, best_phase) in enumerate(arm_scores):
-                reals[arm_i][s_i] = best_real
-                shufs[arm_i][:, s_i] = best_shuf
-                orients[arm_i][s_i] = best_orient
-                phases[arm_i][s_i] = best_phase
-        for table, real, shuf, orient, phase in zip(tables, reals, shufs, orients, phases):
-            table["real_ll"][:, r_i] = real
-            table["real_orient"][:, r_i] = orient
-            table["real_phase"][:, r_i] = phase
-            table["z_route"][:, r_i] = _z_against(real, shuf)
-            table["shuf_totals"] += shuf
-            weight = table["fired"][r_i].astype(float)
-            table["loo_weighted"] += _loo_z(shuf) * weight
+        for _, s_i, (best_real, best_shuf, best_orient, best_phase) in scored:
+            real_ll[s_i, r_i] = best_real
+            real_orient[s_i, r_i] = best_orient
+            real_phase[s_i, r_i] = best_phase
+            z_route[s_i, r_i] = _z_against(best_real, best_shuf)
+            shuf_totals[:, s_i] += best_shuf
+            weight = fired[r_i].astype(float)
+            loo_weighted[:, s_i] += _loo_z(best_shuf) * weight
 
-    results = []
-    for table, arm_routes in zip(tables, prepared):
-        for route, item in zip(routes, arm_routes):
-            route["n_spikes"] = item["n_spikes"]
-        mean_loo = _weighted_mean(table["loo_weighted"], table["fired"])
-        results.append(_assemble(
-            routes, spacings, orientations, n_target, n_shuffles, n_cells,
-            table["real_ll"], table["z_route"], table["shuf_totals"], mean_loo,
-            table["real_orient"], table["real_phase"],
-            table["fired"], arm_routes[0]["spikes"], return_spikes,
-        ))
-    return results[0] if arms is None else results
+    for route, item in zip(routes, drawn):
+        route["n_spikes"] = item["n_spikes"]
+    mean_loo = _weighted_mean(loo_weighted, fired)
+    return _assemble(
+        routes, spacings, orientations, n_target, n_shuffles, n_cells,
+        real_ll, z_route, shuf_totals, mean_loo,
+        real_orient, real_phase,
+        fired, drawn[0]["spikes"], return_spikes,
+    )
 
 
 def qy_fit(traj, field_pos, field_act, stride, **kwargs):

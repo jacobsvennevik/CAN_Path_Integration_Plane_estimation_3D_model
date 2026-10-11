@@ -398,10 +398,20 @@ class TorchBackend:
         """Mean activity across populations, shape (N,)."""
         return self.S.mean(dim=0).squeeze()
 
-    def track_batch(self, S_chunk: torch.Tensor) -> np.ndarray:
+    def track_batch(self, S_chunk: torch.Tensor, snapshot_rows=None,
+                    time0: int = 0) -> np.ndarray:
         """Decode a (T, N) activity chunk; tracker state carries across frames."""
         vols = S_chunk.detach().cpu().numpy().reshape((-1,) + self.shape)
-        return self.tracker.advance_frames(vols)
+        if not snapshot_rows:
+            return self.tracker.advance_frames(vols)
+        out = np.empty((len(vols), self.d), dtype=np.float64)
+        for i, frame in enumerate(vols):
+            out[i] = self.tracker.advance(frame)
+            row = snapshot_rows.get(time0 + i)
+            if row is not None:
+                self.snapshots[row] = frame
+                self.snapshot_cells[row] = self.tracker.c_prev
+        return out
 
     def form_lattice(self, theta_0, settle=3000, min_peakedness=0.0):
         """Reset, run a fixed undriven settle, record peakedness. Does not drive."""

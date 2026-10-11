@@ -233,7 +233,8 @@ class PathIntegrator:
             segment_starts: np.ndarray = None,
             world_pos: np.ndarray = None,
             field_stride: int = None,
-            max_trace_bytes: int = None) -> np.ndarray:
+            max_trace_bytes: int = None,
+            snapshot_stride: int = None) -> np.ndarray:
         """
         Run the full pipeline over a pre-computed velocity sequence.
 
@@ -309,6 +310,20 @@ class PathIntegrator:
         g = np.asarray(g, dtype=float)
         g_hat = g / np.linalg.norm(g)
 
+        # Sheet frames for plot_bump_snapshots. Empty unless asked.
+        snap_rows = None
+        if snapshot_stride is not None:
+            stride = int(snapshot_stride)
+            if stride < 1:
+                raise ValueError(f"snapshot_stride must be at least 1, got {stride}")
+            times = np.arange(0, T, stride)
+            self.backend.snapshot_times = times
+            self.backend.snapshots = np.empty(
+                (len(times), *self.backend.shape), dtype=np.float32)
+            self.backend.snapshot_cells = np.empty(
+                (len(times), torus_dim), dtype=np.float64)
+            snap_rows = {int(ts): i for i, ts in enumerate(times)}
+
         chunk_start = 0 #first step currently held in _S_chunk
 
         for t in range(T):
@@ -336,7 +351,8 @@ class PathIntegrator:
             # The tracker keeps its state between calls, so chunks join up.
             if filled == chunk or t == T - 1:
                 start = chunk_start
-                theta_history[start:t + 1] = self.backend.track_batch(_S_chunk[:filled])
+                theta_history[start:t + 1] = self.backend.track_batch(
+                    _S_chunk[:filled], snapshot_rows=snap_rows, time0=start)
                 if _field_act is not None:
                     times = np.arange(start, t + 1)
                     keep = (times % _field_stride) == 0

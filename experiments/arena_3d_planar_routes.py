@@ -298,13 +298,6 @@ def make_planar_routes_trajectory(cfg, dt, scale, dim, rng=None, turn_std=None):
     )
 
 
-def columnar_ground_truth(traj, scale, dim):
-    """Same walk, driven with the vertical normal. Ground truth is the horizontal frame."""
-    n = np.tile(np.array([0.0, 0.0, 1.0]), (len(traj.world_pos), 1))
-    gt = torus_gt_from_velocity(traj.v_body_seq, n, scale, dim)
-    return n, gt
-
-
 @dataclass
 class Arena3DPlanarRoutesConfig(ExperimentConfig):
     """Round trips of stored flights from one perch."""
