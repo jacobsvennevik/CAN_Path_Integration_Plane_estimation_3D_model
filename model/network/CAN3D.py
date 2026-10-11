@@ -50,11 +50,15 @@ class CAN3D(CAN):
     b: float
     kernel: object
     dt: float
+    neurons: int
 
     def __post_init__(self):
-        self.neurons_coordinates = (
-            self.manifold.parameter_space.sample_with_spacing(self.spacing)
-        )
+        n = int(self.neurons)
+        if n < 2:
+            raise ValueError(f"neurons per axis must be at least 2, got {n}")
+        self.neurons = n
+        # Exact count. sample_with_spacing(2π/n) can round up to n+1.
+        self.neurons_coordinates = self.manifold.parameter_space.sample(n)
         self.S = np.zeros((self.neurons_coordinates.shape[0], 1))
 
 

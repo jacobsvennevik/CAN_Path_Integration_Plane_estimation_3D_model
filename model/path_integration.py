@@ -97,7 +97,6 @@ class PathIntegrator:
     Path integrator coupling the vMF plane filter with the T^d QAN.
     """
     def __init__(self, qan, kappa_v=None, scale=1.0,
-                 plane_mode="bayesian",
                  decode_chunk=4096, decode_radius=None, decode_seed_radius=None,
                  kappa_w=KAPPA_W_DEFAULT, kappa_sens=300.0,
                  tau_refresh=1, seed=0,
@@ -117,7 +116,6 @@ class PathIntegrator:
         self._R = None
         self.n_gravity_flips = 0
         self._rng = np.random.default_rng(int(seed))
-        self.plane_mode = plane_mode #whether to use the true plane mode or the vMF mode
         self._true_n_hat = Z_HAT.copy()      # gravity / flat floor
         self.decode_chunk = int(decode_chunk) #how many steps to buffer on-device before decoding in one go
         self.decode_radius = decode_radius
@@ -150,7 +148,7 @@ class PathIntegrator:
             seed_radius=self.decode_seed_radius)
 
     def _update_filter(self, v_body, n_ref):
-        """Sensed measurement. True-plane runs do not call this."""
+        """One noisy measurement of the reference normal, then a filter update."""
         d_norm = np.linalg.norm(v_body)
         if d_norm <= 1e-9:
             return
@@ -204,17 +202,13 @@ class PathIntegrator:
         n_ref = np.asarray(n_ref, dtype=float)
         n_ref = n_ref / np.linalg.norm(n_ref)
 
-        #plane mode either bayesian or true plane mode
-        if self.plane_mode != "true":
-            if reset_prior:
-                self._vmf_state = uniform_prior()
-            self._update_filter(v_body, n_ref)
-            n_hat = np.asarray(self._vmf_state.mu, dtype=float).copy()
-            if np.dot(n_hat, g_hat) > 0:
-                n_hat = -n_hat
-                self.n_gravity_flips += 1
-        else:
-            n_hat = n_ref
+        if reset_prior:
+            self._vmf_state = uniform_prior()
+        self._update_filter(v_body, n_ref)
+        n_hat = np.asarray(self._vmf_state.mu, dtype=float).copy()
+        if np.dot(n_hat, g_hat) > 0:
+            n_hat = -n_hat
+            self.n_gravity_flips += 1
 
         #build rotation matrix and rotate velocity. R is kept until the held normal changes.
         if refresh or self._n_held is None:

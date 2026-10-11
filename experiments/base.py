@@ -22,6 +22,7 @@ class Trajectory:
     route_table: list = None
     flight_table: list = None
     n_route_draws: int = 0
+    wall_hits: np.ndarray = None
 
     def __iter__(self):
         yield self.world_pos
@@ -224,8 +225,6 @@ class BaseExperiment:
             qan=self.qan,
             kappa_v=kappa_v,
             scale=self.config.scale,
-            # plane_mode: flip the filter on/off when given; otherwise PlaneConfig.plane_mode
-            plane_mode=plane.plane_mode,
             decode_chunk=decode_chunk,
             kappa_w=plane.kappa_w,
             kappa_sens=plane.kappa_sens,

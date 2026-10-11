@@ -68,7 +68,7 @@ class TorusND(AbstractManifold):
     New manifold structure, d-dimensional torus T^d (T^3 at dim=3).
 
     All dimensions are periodic, representing the possible axises of movement.
-    Topology: T^d = S^1 x ... x S^1. Sheet size is set by CAN spacing.
+    Topology: T^d = S^1 x ... x S^1. Sheet size is neurons per axis.
     """
     dim: int = 2
     parameter_space: ParameterSpaceND = field(init=False)

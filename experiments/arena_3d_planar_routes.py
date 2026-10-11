@@ -204,26 +204,13 @@ def _push(blocks, pos, vel, normal, segment, route_label, flight_label, plane):
     blocks["plane"].append(np.full(n_rows, int(plane), dtype=int))
 
 
-def _rest(blocks, where, n_steps, normal, segment, plane):
-    #append a pause to the blocks above, when one round trip is done
-    if int(n_steps) <= 0:
-        return
-    where = np.asarray(where, dtype=float)
-    _push(
-        blocks,
-        np.repeat(where[None, :], int(n_steps), axis=0),
-        np.zeros((int(n_steps), 3)),
-        normal, segment, -1, -1, plane,
-    )
-
-
 def _route_table(routes):
     """One outbound row and one return row for each stored flight."""
     rows = []
     for r, route in enumerate(routes):
         n_true = np.asarray(route["n_true"], dtype=float).copy()
-        rows.append({"route": 2 * r, "n_true": n_true.copy()})
-        rows.append({"route": 2 * r + 1, "n_true": n_true.copy()})
+        rows.append({"route": 2 * r, "n_fit": n_true.copy()})
+        rows.append({"route": 2 * r + 1, "n_fit": n_true.copy()})
     return rows
 
 
@@ -237,11 +224,6 @@ def make_planar_routes_trajectory(cfg, dt, scale, dim, rng=None, turn_std=None):
     #build the routes and the schedule
     routes, n_drawn = build_routes(cfg, w, rng)
     schedule = build_schedule(cfg.n_routes, cfg.round_trips, rng)
-    
-    #Get the home perch
-    P = np.asarray(HOME_PERCH, dtype=float)
-    #how long the rest are.
-    rest_n = int(cfg.rest_steps)
     
     #Create the container for the blocks, and define parametes
     blocks = _blank()
@@ -279,9 +261,6 @@ def make_planar_routes_trajectory(cfg, dt, scale, dim, rng=None, turn_std=None):
             flight=int(flight), route=int(out_label), base_route=base,
             direction="out", t0=int(t0), t1=int(t),
         ))
-        #Rest at the landing
-        _rest(blocks, route["Q"], rest_n, normal, trip, sheet)
-        t += rest_n
         flight += 1
 
         #Return flight, the stored path reversed.
@@ -296,9 +275,6 @@ def make_planar_routes_trajectory(cfg, dt, scale, dim, rng=None, turn_std=None):
             flight=int(flight), route=int(back_label), base_route=base,
             direction="back", t0=int(t0), t1=int(t),
         ))
-        #Rest back at the perch.
-        _rest(blocks, P, rest_n, normal, trip, sheet)
-        t += rest_n
         flight += 1
 
     #Concatenate the blocks into the trajectory
@@ -335,7 +311,6 @@ class Arena3DPlanarRoutesConfig(ExperimentConfig):
     n_routes: int = 40
     round_trips: int = 10
     takeoff_spread_deg: float = 60.0
-    rest_steps: int = 500
     tilt_min_deg: float = 25.0
     tilt_max_deg: float = 50.0
     ratemap_n_sub: int = 600

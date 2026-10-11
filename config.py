@@ -9,7 +9,7 @@ class NetworkConfig:
 
     Defaults are a provisional live network, NOTE: might need to change
     """
-    spacing:            float = 0.1  # the spacing of neurons on the manifold
+    neurons:            int   = 128  # neurons along each torus axis
     dim:                int   = 2  # T^d the dimension of the torus manifold
     # provisional live network, not the step-2 selection
     lambda_net:         float = 1.28
@@ -33,19 +33,30 @@ class NetworkConfig:
     # The dense matrix is gone; notebook 3 still passes the flag, and it is ignored.
     build_connectivity: bool  = False
 
+    def __post_init__(self):
+        self.neurons = int(self.neurons)
+        if self.neurons < 2:
+            raise ValueError(
+                f"neurons per axis must be at least 2, got {self.neurons}"
+            )
+
     @property
     def n(self) -> int:
-        """Neurons along one axis: ceil(2π / spacing)."""
-        return int(np.ceil(2 * np.pi / self.spacing))
+        """Neurons along one axis."""
+        return int(self.neurons)
+
+    @property
+    def spacing(self) -> float:
+        """Radians between neighboring neurons: 2π / neurons."""
+        return float(2 * np.pi / self.n)
 
 
 @dataclass
 class PlaneConfig:
-    """Estimator readout: vMF filter, hold, and which normal drives E."""
+    """Estimator readout: vMF filter and how long the normal is held."""
     kappa_v:         float | None = None  # None uses kappa_sens
     kappa_w:         float = 1e4
     kappa_sens:      float = 300.0
-    plane_mode:      str   = "bayesian"  # "bayesian" (default) or "true"
     tau_refresh:     int   = 1
     refresh_timing:  str   = "free"     # harness
     refresh_settle_steps: int = 200
@@ -60,7 +71,7 @@ class ExperimentConfig:
     env_size:         float = 2.0    # metres: size of the box the animal walks in (walk boundaries)
     n_steps:          int   = 3000 #Defult timesteps
     seed:             int   = 0
-    grid_spacing:     float = 0.48    # metres per bump spacing 
+    grid_spacing:     float = 0.15    # metres per field period; 2 m arena is 13.33 periods 
     target_speed_rad_per_time: float = 0.004  # desired bump speed
 
     omega_std:        float = 0.03
@@ -88,7 +99,7 @@ class RunConfig:
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
     plane:      PlaneConfig      = field(default_factory=PlaneConfig)
     analysis:   AnalysisConfig   = field(default_factory=AnalysisConfig)
-    # no spacing/grid_spacing assert: different unit systems, no reason to match
+    # no neurons/grid_spacing assert: different unit systems, no reason to match
 
     @property
     def scale(self) -> float:

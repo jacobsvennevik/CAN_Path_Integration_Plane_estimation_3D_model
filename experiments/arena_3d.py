@@ -28,7 +28,9 @@ class Arena3DExperiment(BaseExperiment):
 
         world_pos  = np.zeros((w.n_steps, 3))
         v_body_seq = np.zeros((w.n_steps, 3))
- 
+        #save the times we hit a wall
+        wall_hits = np.zeros((w.n_steps, 3), dtype=np.int8)
+
         direction = w.rng.normal(size=3)
         direction /= np.linalg.norm(direction)            # random initial unit heading
  
@@ -39,6 +41,7 @@ class Arena3DExperiment(BaseExperiment):
             new_pos = world_pos[t - 1] + v
             for dim in range(3):                          # reflect in x, y AND z
                 if new_pos[dim] > w.limit or new_pos[dim] < -w.limit:
+                    wall_hits[t, dim] = 1 if new_pos[dim] > w.limit else -1
                     direction[dim] = -direction[dim]      # specular bounce
                     v = w.world_speed * direction
                     new_pos = world_pos[t - 1] + v
@@ -54,6 +57,7 @@ class Arena3DExperiment(BaseExperiment):
                 world_pos[:, :d],#keep as many axis as the the manifold has
                 w.scale),
             n_true_seq=n_true,
+            wall_hits=wall_hits,
         )
     
     

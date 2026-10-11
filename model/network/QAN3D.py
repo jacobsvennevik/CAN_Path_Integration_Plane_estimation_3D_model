@@ -18,13 +18,13 @@ class Torus3DQAN(QAN):
     Every parameter is required. The defaults live in ``config.NetworkConfig``,
     so the usual way to build one is to name only what you are changing::
 
-        Torus3DQAN.from_config(NetworkConfig(spacing=0.3, lambda_net=2.5))
+        Torus3DQAN.from_config(NetworkConfig(neurons=128, lambda_net=2.5))
 
     Constructing directly works too, it just means naming every parameter.
     """
     manifold: AbstractManifold = field(default=None)
     # --- kernel ---
-    spacing:            float   # radians between neighboring neurons on the torus (resolution)
+    neurons:            int     # neurons along each torus axis
     lambda_net:         float   # kernel width
     ratio:              float   # ratio between
 
@@ -43,7 +43,7 @@ class Torus3DQAN(QAN):
         """Build from a NetworkConfig. The one intended entry point."""
         dim = int(getattr(cfg, "dim", 3))
         return cls(manifold=torus3D_manifold.TorusND(dim=dim),
-                   spacing=cfg.spacing, lambda_net=cfg.lambda_net,
+                   neurons=int(cfg.neurons), lambda_net=cfg.lambda_net,
                    ratio=cfg.ratio, b=cfg.b, offset_magnitude=cfg.offset_magnitude,
                    alpha=cfg.alpha,
                    dt=cfg.dt, tau=cfg.tau,
@@ -66,7 +66,8 @@ class Torus3DQAN(QAN):
                 self.can_signs.append(float(direction))
                 self.cans.append(
                     CAN3D(
-                        self.manifold, self.spacing, 1.0, self.kernel.sigma_i,   # alpha,sigma slots vestigial (MADE parent)
+                        self.manifold, 2 * np.pi / self.neurons, 1.0, self.kernel.sigma_i,   # alpha,sigma slots vestigial (MADE parent)
+                        neurons=self.neurons,
                         b=self.b, kernel=self.kernel, dt=self.dt, tau=self.tau,
                         weights_offset=lambda x, d=d, direction=direction, mag=self.offset_magnitude: (
                             _shift_coordinates(x, d, direction, mag)),

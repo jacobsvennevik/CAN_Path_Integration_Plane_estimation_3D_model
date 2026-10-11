@@ -13,12 +13,22 @@ N_SHUFFLES = 200
 N_TARGET = 500
 
 
-def plane_chart(world_pos, n_true, x_home=None):
-    """Turn 3-D positions into 2-D coordinates in the plane of the true normal."""
+def plane_chart(world_pos, n_fit=None, x_home=None, basis=None):
+    """Turn 3-D positions into 2-D coordinates in the chart plane.
+
+    frame(n_fit) lays the chart normal flat. That is the generated movement plane of a
+    planar route. A volumetric flight passes the SVD axes instead.
+    """
     world_pos = np.asarray(world_pos, dtype=float)
     if x_home is None:
         x_home = world_pos[0]
-    return (world_pos - np.asarray(x_home, dtype=float)) @ frame(n_true)
+    if basis is None:
+        if n_fit is None:
+            raise ValueError("plane_chart needs a basis or a chart normal")
+        basis = frame(n_fit)
+    else:
+        basis = np.asarray(basis, dtype=float)
+    return (world_pos - np.asarray(x_home, dtype=float)) @ basis
 
 
 def align_field_trace(series, stride, n_samp):
@@ -150,7 +160,13 @@ def _routes(flight_of, flight_table, route_table):
     clusters by grouping flights that follow nearly the same path from start
     to finish. A return starts at the other end, so it gets a route of its own.
     """
-    normals = {int(row["route"]): np.asarray(row["n_true"], dtype=float) for row in route_table}
+    normals = {}
+    bases = {}
+    for row in route_table:
+        route_id = int(row["route"])
+        normals[route_id] = np.asarray(row["n_fit"], dtype=float)
+        if row.get("basis") is not None:
+            bases[route_id] = np.asarray(row["basis"], dtype=float)
 
     #put all the flights for each route together
     grouped = {}
@@ -182,7 +198,8 @@ def _routes(flight_of, flight_table, route_table):
             route=int(route_id),
             index=np.concatenate(parts),
             slices=slices,
-            n_true=normals[route_id],
+            n_fit=normals[route_id],
+            basis=bases.get(route_id),
         ))
     return routes
 
@@ -415,10 +432,19 @@ def _pair_task(r_i, s_i, xy, spacing, orientations, n_phase, arms_here, n_shuffl
     return r_i, s_i, _score_pair(xy, spacing, orientations, n_phase, arms_here, n_shuffles)
 
 
+def _weighted_mean(total, fired):
+    """Mean over routes. ``fired`` weights each route; a silent route adds nothing."""
+    denom = np.asarray(fired, dtype=float).sum(axis=0)
+    out = np.zeros_like(total, dtype=float)
+    active = denom > 0.0
+    out[..., active] = total[..., active] / denom[active]
+    return out
+
+
 def _assemble(routes, spacings, orientations, n_target, n_shuffles, n_cells,
-              real_ll, shuf_ll, real_orient, real_phase, fired, spikes, return_spikes):
+              real_ll, z_route, shuf_totals, mean_loo,
+              real_orient, real_phase, fired, spikes, return_spikes):
     #Turns the per-route log-likelihood tables into one spacing choice and one grid-fit score per cell
-    z_route = _z_against(real_ll, shuf_ll)
     if z_route.shape != real_ll.shape:
         raise RuntimeError(
             f"real z-score has shape {z_route.shape}, expected {real_ll.shape}"
@@ -428,15 +454,12 @@ def _assemble(routes, spacings, orientations, n_target, n_shuffles, n_cells,
     spacing_choice = np.argmax(mean_z, axis=0)
     #score the data on this scoring
     real_totals = real_ll.sum(axis=1)
-    shuf_totals = shuf_ll.sum(axis=2)
     cell_total = real_totals[spacing_choice, np.arange(n_cells)]
     null_at_choice = _take(
         shuf_totals, np.broadcast_to(spacing_choice, (int(n_shuffles), n_cells)),
     )
     grid_fit = _z_against(cell_total, null_at_choice)
     #Build a null that also gets to pick its spacing
-    z_loo_route = _loo_z(shuf_ll)
-    mean_loo = _mean_over_fired(z_loo_route, fired)
     choice_j = np.argmax(mean_loo, axis=1)
     z_loo_total = _loo_z(shuf_totals)
     null_scores = _take(z_loo_total, choice_j)
@@ -505,6 +528,8 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
     if arms:
         jobs.extend((np.asarray(item[0], dtype=float), item[1]) for item in arms)
     routes = _routes(flight_of, flight_table, route_table)
+    if not routes:
+        raise ValueError("no flights to fit")
     if spacings is None:
         spacings = spacing_values()
     if orientations is None:
@@ -512,21 +537,27 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
     spacings = np.asarray(spacings, dtype=float)
     orientations = np.asarray(orientations, dtype=float)
     for route in routes:
-        route["xy"] = plane_chart(positions[route["index"]], route["n_true"])
+        route["xy"] = plane_chart(
+            positions[route["index"]], route["n_fit"], basis=route["basis"],
+        )
     # Every arm's draws happen before the search, in the order the arms are given.
     prepared = [
         _prepare_arm(act, arm_seed, routes, positions, n_target, n_shuffles)
         for act, arm_seed in jobs
     ]
-    #allocate empty scoring tables
+    # Shuffle scores are reduced one route at a time. The full
+    # (shuffle, spacing, route, cell) tensor is not stored.
     n_cells = jobs[0][0].shape[1]
     n_routes = len(routes)
     n_spacings = len(spacings)
+    n_shuf = int(n_shuffles)
     tables = []
     for arm_routes in prepared:
         tables.append(dict(
             real_ll=np.full((n_spacings, n_routes, n_cells), -np.inf),
-            shuf_ll=np.full((int(n_shuffles), n_spacings, n_routes, n_cells), -np.inf),
+            z_route=np.zeros((n_spacings, n_routes, n_cells)),
+            shuf_totals=np.zeros((n_shuf, n_spacings, n_cells)),
+            loo_weighted=np.zeros((n_shuf, n_spacings, n_cells)),
             real_orient=np.full((n_spacings, n_routes, n_cells), -1, dtype=int),
             real_phase=np.full((n_spacings, n_routes, n_cells), -1, dtype=int),
             fired=np.stack([item["n_spikes"] for item in arm_routes], axis=0) > 0,
@@ -534,36 +565,52 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
             n_spikes=arm_routes,
         ))
 
-    #Search each route for the best spacing, orientation, and phase.
-    pairs = []
-    for r_i in range(n_routes):
-        for s_i, spacing in enumerate(spacings):
-            pairs.append((
-                r_i, s_i, routes[r_i]["xy"], float(spacing), orientations, n_phase,
-                [arm[r_i] for arm in prepared], n_shuffles,
-            ))
-
     workers = _default_jobs() if n_jobs is None else int(n_jobs)
-    if workers <= 1 or len(pairs) <= 1:
-        scored = [_pair_task(*item) for item in pairs]
-    else:
+    parallel = None
+    if workers > 1:
         from joblib import Parallel, delayed
-        scored = Parallel(n_jobs=workers)(delayed(_pair_task)(*item) for item in pairs)
+        parallel = Parallel(n_jobs=workers)
 
-    for r_i, s_i, arm_scores in scored:
-        for table, (best_real, best_shuf, best_orient, best_phase) in zip(tables, arm_scores):
-            table["real_ll"][s_i, r_i] = best_real
-            table["shuf_ll"][:, s_i, r_i] = best_shuf
-            table["real_orient"][s_i, r_i] = best_orient
-            table["real_phase"][s_i, r_i] = best_phase
+    #Search each route for the best spacing, orientation, and phase.
+    for r_i, route in enumerate(routes):
+        pairs = [
+            (r_i, s_i, route["xy"], float(spacing), orientations, n_phase,
+             [arm[r_i] for arm in prepared], n_shuffles)
+            for s_i, spacing in enumerate(spacings)
+        ]
+        if parallel is None or len(pairs) <= 1:
+            scored = [_pair_task(*item) for item in pairs]
+        else:
+            scored = parallel(delayed(_pair_task)(*item) for item in pairs)
+
+        reals = [np.empty((n_spacings, n_cells)) for _ in tables]
+        shufs = [np.empty((n_shuf, n_spacings, n_cells)) for _ in tables]
+        orients = [np.empty((n_spacings, n_cells), dtype=int) for _ in tables]
+        phases = [np.empty((n_spacings, n_cells), dtype=int) for _ in tables]
+        for _, s_i, arm_scores in scored:
+            for arm_i, (best_real, best_shuf, best_orient, best_phase) in enumerate(arm_scores):
+                reals[arm_i][s_i] = best_real
+                shufs[arm_i][:, s_i] = best_shuf
+                orients[arm_i][s_i] = best_orient
+                phases[arm_i][s_i] = best_phase
+        for table, real, shuf, orient, phase in zip(tables, reals, shufs, orients, phases):
+            table["real_ll"][:, r_i] = real
+            table["real_orient"][:, r_i] = orient
+            table["real_phase"][:, r_i] = phase
+            table["z_route"][:, r_i] = _z_against(real, shuf)
+            table["shuf_totals"] += shuf
+            weight = table["fired"][r_i].astype(float)
+            table["loo_weighted"] += _loo_z(shuf) * weight
 
     results = []
     for table, arm_routes in zip(tables, prepared):
         for route, item in zip(routes, arm_routes):
             route["n_spikes"] = item["n_spikes"]
+        mean_loo = _weighted_mean(table["loo_weighted"], table["fired"])
         results.append(_assemble(
             routes, spacings, orientations, n_target, n_shuffles, n_cells,
-            table["real_ll"], table["shuf_ll"], table["real_orient"], table["real_phase"],
+            table["real_ll"], table["z_route"], table["shuf_totals"], mean_loo,
+            table["real_orient"], table["real_phase"],
             table["fired"], arm_routes[0]["spikes"], return_spikes,
         ))
     return results[0] if arms is None else results
