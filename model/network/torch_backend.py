@@ -322,24 +322,28 @@ class TorchBackend:
         S0[distances <= effective_radius] = self.qan.b
 
         #Copy that same starting bump into all six CANs.
-        self.S = S0.unsqueeze(0).expand(len(self.qan.cans), -1, -1).clone()
+        self.S.copy_(S0.unsqueeze(0).expand(len(self.qan.cans), -1, -1))
 
     def step(self, theta_dot: np.ndarray):
         """Compute S_tot internally and step."""
         S_tot = torch.mean(self.S, dim=0) #average activity acrosse CAN
         return self.step_from_shared_state(S_tot, theta_dot)
 
-    def _step_impl(self, S_tot: torch.Tensor, td: torch.Tensor) -> torch.Tensor:
-        """One bump update. S_tot and td are tensors already on the device."""
+    def _step_impl(self, S: torch.Tensor, S_tot: torch.Tensor, td: torch.Tensor) -> torch.Tensor:
         N = S_tot.shape[0]
-        n_pops = self.S.shape[0]
+        n_pops = S.shape[0]
+
+        #The current neural activity, gives us where the bump is currently, the mean field
         S_shared = S_tot.unsqueeze(0).expand(n_pops, N, 1)
+        #Apply each CANs shifted weight matricies W to the shared bump of activity
         Ws = self._apply_W_fft(S_shared)
         v_m = (self.signs_torch * self.qan.drive_per_theta_dot
                * td[self.dims_torch]).view(n_pops, 1, 1)
+        # Apply the recurrent input to each neuron,
+        # passed through a relu and shifted up by the bias b and velocity v_m.
         drives = torch.relu(Ws + self.b + v_m)
-        self.S = self.S + (self.dt / self.tau) * (drives - self.S)
-        return self.S
+        #Updates the current neural state
+        return S + (self.dt / self.tau) * (drives - S)
 
     def step_from_shared_state(self, S_tot: torch.Tensor, theta_dot: np.ndarray,
         check_nan: bool = False,
@@ -348,13 +352,15 @@ class TorchBackend:
         Implements the bump updates driven by the velcoity using the shared mean neural state, the current neural activity S_tot. 
         In this way we take a step, and the bump moves.
         """
+        #The pr CAN velocity inut
         td = torch.as_tensor(theta_dot, dtype=self.torch_dtype, device=self.device)  # (d,)
         if td.numel() != self.d:
             raise ValueError(
                 f"theta_dot has {td.numel()} components, network has {self.d}. "
                 "Project the world velocity first (step 3), do not slice it."
             )
-        self._step_compiled(S_tot, td)
+        torch.compiler.cudagraph_mark_step_begin()
+        self.S.copy_(self._step_compiled(self.S, S_tot, td))
 
         if check_nan and torch.isnan(self.S).any().item():
             raise ValueError("NaN values detected in torch QAN state.")

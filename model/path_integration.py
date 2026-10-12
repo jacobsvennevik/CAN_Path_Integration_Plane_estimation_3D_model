@@ -64,13 +64,11 @@ class _Prof:
         self.totals[name] = self.totals.get(name, 0.0) + (time.perf_counter() - self._t)
 
     def lap(self, name: str) -> None:
-        """CPU time since the last mark. Does not sync the device."""
         now = time.perf_counter()
         self.totals[name] = self.totals.get(name, 0.0) + (now - self._t)
         self._t = now
 
     def take_sync(self, name: str) -> None:
-        """Time one device sync by itself, then start the next mark."""
         t0 = time.perf_counter()
         self.sync()
         now = time.perf_counter()
@@ -458,7 +456,7 @@ class PathIntegrator:
                     if prof is not None:
                         prof.stop("record_shuffle_chunk")
                         
-                # track_batch times its own .cpu() copy and the numpy decode.
+                #takes the stored sheet activity, moves it to the CPU (only pr chuk so fine), and find where the bump is.
                 theta_history[start:t + 1] = self.backend.track_batch(
                     _S_chunk[:filled], snapshot_rows=snap_rows, time0=start)
                 
