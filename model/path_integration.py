@@ -80,37 +80,38 @@ class _Prof:
             torch.mps.synchronize()
 
     def start(self) -> None:
+        t = time.perf_counter()
         self.sync()
+        self.totals["profiler sync"] = (
+            self.totals.get("profiler sync", 0.0) + (time.perf_counter() - t))
         self._t = time.perf_counter()
 
     def stop(self, name: str) -> None:
         self.sync()
         self.totals[name] = self.totals.get(name, 0.0) + (time.perf_counter() - self._t)
 
-    def report(self, n_steps: int, wall: float) -> None:
-        print(f"profile {n_steps} steps on {self.device}")
+    def _rows(self, n_steps: int, wall: float):
         named = 0.0
         rows = sorted(self.totals.items(), key=lambda kv: kv[1], reverse=True)
+        lines = []
         for name, seconds in rows:
             named += seconds
-            print(f"  {name:<24} {seconds:8.3f} s   {seconds / n_steps * 1e3:7.3f} ms/step")
+            lines.append((name, seconds, seconds / n_steps * 1e3))
         other = wall - named
-        print(f"  {'other':<24} {other:8.3f} s   {other / n_steps * 1e3:7.3f} ms/step")
+        lines.append(("other", other, other / n_steps * 1e3))
+        return lines
+
+    def report(self, n_steps: int, wall: float) -> None:
+        print(f"profile {n_steps} steps on {self.device}", flush=True)
+        for name, seconds, per in self._rows(n_steps, wall):
+            print(f"  {name:<24} {seconds:8.3f} s   {per:7.3f} ms/step", flush=True)
         print(f"  {'total':<24} {wall:8.3f} s   {wall / n_steps * 1e3:7.3f} ms/step", flush=True)
 
     def progress(self, done: int, total: int, wall: float) -> None:
         """One line of cumulative rates, printed when a chunk finishes."""
-        def ms(name):
-            return self.totals.get(name, 0.0) / done * 1e3
-
-        means = ms("torch.mean") + ms("sheet_mean")
+        parts = [f"{name} {per:.2f}" for name, _, per in self._rows(done, wall)]
         print(
-            f"step {done}/{total}  {wall / done * 1e3:.2f} ms/step  "
-            f"network {ms('step_from_shared_state'):.2f}  "
-            f"means {means:.2f}  "
-            f"ratemap {ms('record_ratemap'):.2f}  "
-            f"shuffle {ms('record_shuffle_chunk'):.2f}  "
-            f"track {ms('track_batch'):.2f}",
+            f"step {done}/{total}  {wall / done * 1e3:.2f} ms/step  " + "  ".join(parts),
             flush=True,
         )
 
@@ -317,6 +318,7 @@ class PathIntegrator:
         theta_history = np.zeros((T, torus_dim)) #place to store decoded positions
         self._prof = _Prof(dev) if profile else None
         prof = self._prof
+        self.backend._prof = prof
 
         if refresh_mask is None:
             refresh_mask = self.default_refresh_mask(T)
@@ -412,13 +414,19 @@ class PathIntegrator:
             activity = self.backend.sheet_mean()
             if prof is not None:
                 prof.stop("sheet_mean")
+                prof.start()
             # stash the bump state on-device, no .cpu() here
             _S_chunk[t - chunk_start] = activity
+            if prof is not None:
+                prof.stop("stash activity")
+                prof.start()
 
             # write history straight into the arrays
             _h_n_hat[t] = n_hat
             _h_n_held[t] = self._n_held
             _h_kappa[t] = float(self._vmf_state.kappa)
+            if prof is not None:
+                prof.stop("history")
 
             if _acc is not None:
                 if prof is not None:
@@ -449,13 +457,9 @@ class PathIntegrator:
                     if prof is not None:
                         prof.stop("record_shuffle_chunk")
                         
-                #takes the stored sheet activity, moves it to the CPU (only pr chuk so fine), and find where the bump is.
-                if prof is not None:
-                    prof.start()
+                # track_batch times its own .cpu() copy and the numpy decode.
                 theta_history[start:t + 1] = self.backend.track_batch(
                     _S_chunk[:filled], snapshot_rows=snap_rows, time0=start)
-                if prof is not None:
-                    prof.stop("track_batch")
                 
                 #keep a thin record of the activity for the grid-field measurement
                 if _field_act is not None:
@@ -468,13 +472,18 @@ class PathIntegrator:
                             np.flatnonzero(keep), dtype=torch.long, device=dev)
                         act = _S_chunk.index_select(0, rows).index_select(1, sub_t)
                         n_keep = int(keep.sum())
+                        if prof is not None:
+                            prof.stop("field index")
+                            prof.start()
                         _field_act[_field_write:_field_write + n_keep] = (
                             act.detach().cpu().numpy())
                         _field_pos[_field_write:_field_write + n_keep] = (
                             world_pos[times[keep]])
                         _field_write += n_keep
-                    if prof is not None:
-                        prof.stop("field trace")
+                        if prof is not None:
+                            prof.stop("field .cpu()")
+                    elif prof is not None:
+                        prof.stop("field index")
                 chunk_start = t + 1
                 if prof is not None:
                     prof.sync()
@@ -482,22 +491,28 @@ class PathIntegrator:
 
         if prof is not None:
             prof.sync()
-            prof.report(T, time.perf_counter() - wall0)
-            self._prof = None
 
         self.history["n_hat"] = _h_n_hat
         self.history["n_held"] = _h_n_held
         self.history["kappa"] = _h_kappa
 
         if _acc is not None:
+            if prof is not None:
+                prof.start()
             self.ratemap_sums, self.ratemap_counts = \
                 self.backend.ratemap_to_numpy(_acc, ratemap_bins, ndim=ratemap_ndim)
+            if prof is not None:
+                prof.stop("ratemap .cpu()")
         else:
             self.ratemap_sums = self.ratemap_counts = None
 
         if _shuf is not None:
+            if prof is not None:
+                prof.start()
             shape = (n_shuffle,) + (ratemap_bins,) * ratemap_ndim + (-1,)
             self.ratemap_shuf_sums = _shuf.cpu().numpy().reshape(shape)
+            if prof is not None:
+                prof.stop("shuffle .cpu()")
         else:
             self.ratemap_shuf_sums = None
 
@@ -505,6 +520,11 @@ class PathIntegrator:
             self.field_pos = _field_pos[:_field_write]
             self.field_act = _field_act[:_field_write]
             self.field_stride = _field_stride
+
+        if prof is not None:
+            prof.report(T, time.perf_counter() - wall0)
+            self.backend._prof = None
+            self._prof = None
 
         return theta_history
 
