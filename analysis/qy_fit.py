@@ -12,6 +12,7 @@ SIGMA_FRAC = 0.125
 N_PHASE = 14
 N_SHUFFLES = 200
 N_TARGET = 500
+ORIENT_BATCH = 4 # A few orientations batches at once
 
 
 def plane_chart(world_pos, n_fit=None, x_home=None, basis=None):
@@ -68,15 +69,16 @@ def hex_basis(spacing, orientation_deg):
     return raw @ rotation.T
 
 
-def _lattice_g(xy, spacing, orientation_deg, n_phase=N_PHASE, floor=FLOOR):
+def _lattice_g(xy, spacing, orientations, n_phase=N_PHASE, floor=FLOOR):
     """
     Build the firing-rate pattern of one hexagonal candidate and evaluate it at every position on the route,
-    once for every phase.
+    once for every phase. ``orientations`` is every angle in this group.
     """
     #basis matrix for the hexagonal candidate
-    basis = torch.from_numpy(
-        np.ascontiguousarray(hex_basis(spacing, orientation_deg), dtype=np.float32)
-    ).to(xy.device)
+    bases = np.stack(
+        [hex_basis(spacing, float(angle)) for angle in orientations], axis=0,
+    )
+    basis = torch.from_numpy(np.ascontiguousarray(bases, dtype=np.float32)).to(xy.device)
     #width of the Gaussian
     sigma2 = (SIGMA_FRAC * float(spacing)) ** 2
     #rewrites every position in units of the basis
@@ -89,7 +91,7 @@ def _lattice_g(xy, spacing, orientation_deg, n_phase=N_PHASE, floor=FLOOR):
     #one row per phase
     phase = torch.stack((pi.reshape(-1), pj.reshape(-1)), dim=1)
     #subtract every phase from every position
-    shifted = coords[None, :, :] - phase[:, None, :]
+    shifted = coords[:, None, :, :] - phase[None, :, None, :]
     #whole steps along each arrow: the lower corner of the cell
     u0 = torch.floor(shifted[..., 0])
     v0 = torch.floor(shifted[..., 1])
@@ -103,11 +105,11 @@ def _lattice_g(xy, spacing, orientation_deg, n_phase=N_PHASE, floor=FLOOR):
         (torch.where(upper, u0 + 1.0, u0), v0 + 1.0),
     )
 
-    total = torch.zeros(shifted.shape[:2], device=xy.device, dtype=xy.dtype)
+    total = torch.zeros(shifted.shape[:3], device=xy.device, dtype=xy.dtype)
     #visits the three corners
     for cu, cv in corners:
         delta = torch.stack((shifted[..., 0] - cu, shifted[..., 1] - cv), dim=-1) # how far the animal is from that corner, still in step units.
-        world = delta @ basis #turns that offset into a distance in the plane.
+        world = delta @ basis[:, None, :, :] #turns that offset into a distance in the plane.
         dist2 = (world * world).sum(dim=-1)
         total = total + torch.exp(-dist2 / (2.0 * sigma2)) #adds a Gaussian of peak 1 and width
     return total + float(floor)
@@ -275,21 +277,6 @@ def _count_matrix(idx, valid, n_samples):
 
 
 
-def _best_phase(n_spikes, occupancy, spike_term):
-    """Best log-likelihood over a phase"""
-    ll = log_likelihood_from_parts(
-        n_spikes[:, None], occupancy[None, :], spike_term)
-    return torch.max(ll, dim=1)
-
-
-def _best_phase_shifts(n_spikes, occupancy, spike_term):
-    """Best log-likelihood over phase for several shifts at once.
-    """
-    ll = log_likelihood_from_parts(
-        n_spikes[None, :, None], occupancy[None, None, :], spike_term)
-    return ll.amax(dim=-1)
-
-
 def _z_against(value, null):
     """Z-score the LL scores against every row of the shuffles."""
     null = np.asarray(null, dtype=float)
@@ -399,7 +386,7 @@ def _score_pair(xy, spacing, orientations, n_phase, drawn, n_shuffles, counts=No
     """Best orientation and phase for one route at one spacing.
 
     ``counts`` is the route's real and shuffled spike tables, already on the
-    scoring device. The lattice is built here, one orientation at a time.
+    scoring device. Orientations are scored a few at a time.
     """
     device = _scoring_device()
     n_cells = int(drawn["n_spikes"].shape[0])
@@ -421,27 +408,35 @@ def _score_pair(xy, spacing, orientations, n_phase, drawn, n_shuffles, counts=No
     best_shuf = torch.full((n_shuffles, n_cells), -torch.inf, device=device)
 
     with torch.inference_mode():
-        #Try each orientation.
-        for o_i, orientation in enumerate(orientations):
-            #Build all phases for this orientation.
-            g = _lattice_g(xy, spacing, orientation, n_phase=n_phase)
-            #log g turned to one row per sample, one column per phase
-            log_g = torch.log(g).transpose(0, 1).contiguous()
+        #Try orientations a few at a time.
+        for start in range(0, len(orientations), ORIENT_BATCH):
+            angles = orientations[start:start + ORIENT_BATCH]
+            #Build all phases for these orientations.
+            g = _lattice_g(xy, spacing, angles, n_phase=n_phase)
+            n_phase_grid = g.shape[1]
+            #log g turned to one row per sample, one column per orientation and phase
+            log_g = torch.log(g).permute(2, 0, 1).reshape(g.shape[2], -1).contiguous()
             #Sum the lattice fields at every point to get occupancy.
-            occupancy = g.sum(dim=1)
-            #Find the best phase for this orientation
-            ll, phase = _best_phase(n_spikes, occupancy, torch.sparse.mm(real, log_g))
+            occupancy = g.sum(dim=-1)
+            #Find the best phase, then the best orientation in this group.
+            real_term = torch.sparse.mm(real, log_g).reshape(n_cells, -1, n_phase_grid)
+            ll = log_likelihood_from_parts(
+                n_spikes[:, None, None], occupancy[None, :, :], real_term)
+            ll_phase, phase_i = torch.max(ll, dim=-1)
+            ll_o, o_local = torch.max(ll_phase, dim=-1)
             # better is true for each cell whose likelihood beat the best orientation so far
-            better = ll > best_real
-            best_real = torch.where(better, ll, best_real)
-            best_phase = torch.where(better, phase, best_phase)
-            best_orient = torch.where(better, o_i, best_orient)
+            better = ll_o > best_real
+            chosen_phase = phase_i[torch.arange(n_cells, device=device), o_local]
+            best_real = torch.where(better, ll_o, best_real)
+            best_phase = torch.where(better, chosen_phase, best_phase)
+            best_orient = torch.where(better, o_local + start, best_orient)
 
-            #Calculate LL for each shuffle
-            terms = torch.sparse.mm(shuf, log_g).reshape(n_shuffles, n_cells, -1)
-            #Find the best phase for each shuffle.
-            ll_s = _best_phase_shifts(n_spikes, occupancy, terms)
-            best_shuf = torch.maximum(best_shuf, ll_s)
+            #Calculate LL for each shuffle, best phase and orientation.
+            terms = torch.sparse.mm(shuf, log_g).reshape(
+                n_shuffles, n_cells, -1, n_phase_grid)
+            ll_s = log_likelihood_from_parts(
+                n_spikes[None, :, None, None], occupancy[None, None, :, :], terms)
+            best_shuf = torch.maximum(best_shuf, ll_s.amax(dim=(-1, -2)))
 
     return (
         best_real.cpu().numpy(),
