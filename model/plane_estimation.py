@@ -7,7 +7,35 @@ See references.
 
 """
 
-D = 3 
+D = 3
+Z_HAT = np.array([0.0, 0.0, 1.0])
+
+
+def build_rotation_matrix(n_hat: np.ndarray) -> np.ndarray:
+    """
+    Returns R such that R @ n_hat = z_hat, via the closed-form
+    vector-to-vector rotation (Rodrigues).
+    """
+    n_hat = np.asarray(n_hat, dtype=float)
+    n_hat = n_hat / np.linalg.norm(n_hat)
+    z_hat = Z_HAT
+
+    v = np.cross(n_hat, z_hat)   # rotation axis * sin(theta)
+    c = float(np.dot(n_hat, z_hat))  # cos(theta)
+
+    # already aligned -> identity (this is the common case on a flat floor)
+    if c > 1.0 - 1e-10:
+        return np.eye(3)
+    # anti-aligned (n_hat points straight down) -> 180° flip
+    if c < -1.0 + 1e-10:
+        return np.diag([1.0, -1.0, -1.0])
+
+    vx = np.array([
+        [0.0,  -v[2],  v[1]],
+        [v[2],  0.0,  -v[0]],
+        [-v[1], v[0],  0.0 ],
+    ])
+    return np.eye(3) + vx + vx @ vx * (1.0 / (1.0 + c)) 
 
 
 def A_d(kappa, d=D):
@@ -93,7 +121,6 @@ def uniform_prior():
 
 def sample_vmf(mu, kappa, rng):
     """One draw from vMF(mu, kappa) on S^2 (closed-form inverse CDF of the polar cosine)."""
-    from model.path_integration import build_rotation_matrix
     mu = np.asarray(mu, dtype=float) 
     mu = mu / np.linalg.norm(mu) #make mu a unit vector
     kappa = float(kappa) #kappa is the concentration parameter

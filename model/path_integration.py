@@ -9,37 +9,10 @@ from model.plane_estimation import (
     update,
     uniform_prior,
     sample_vmf,
+    build_rotation_matrix,
+    Z_HAT,
 )
 from model.network.torch_backend import TorchBackend
-
-Z_HAT = np.array([0.0, 0.0, 1.0])
-
-
-def build_rotation_matrix(n_hat: np.ndarray) -> np.ndarray:
-    """
-    Returns R such that R @ n_hat = z_hat, via the closed-form
-    vector-to-vector rotation (Rodrigues).
-    """
-    n_hat = np.asarray(n_hat, dtype=float)
-    n_hat = n_hat / np.linalg.norm(n_hat)
-    z_hat = Z_HAT
-
-    v = np.cross(n_hat, z_hat)   # rotation axis * sin(theta)
-    c = float(np.dot(n_hat, z_hat))  # cos(theta)
-
-    # already aligned -> identity (this is the common case on a flat floor)
-    if c > 1.0 - 1e-10:
-        return np.eye(3)
-    # anti-aligned (n_hat points straight down) -> 180° flip
-    if c < -1.0 + 1e-10:
-        return np.diag([1.0, -1.0, -1.0])
-
-    vx = np.array([
-        [0.0,  -v[2],  v[1]],
-        [v[2],  0.0,  -v[0]],
-        [-v[1], v[0],  0.0 ],
-    ])
-    return np.eye(3) + vx + vx @ vx * (1.0 / (1.0 + c))
 
 
 def frame(n_hat: np.ndarray) -> np.ndarray:
@@ -89,6 +62,20 @@ class _Prof:
     def stop(self, name: str) -> None:
         self.sync()
         self.totals[name] = self.totals.get(name, 0.0) + (time.perf_counter() - self._t)
+
+    def lap(self, name: str) -> None:
+        """CPU time since the last mark. Does not sync the device."""
+        now = time.perf_counter()
+        self.totals[name] = self.totals.get(name, 0.0) + (now - self._t)
+        self._t = now
+
+    def take_sync(self, name: str) -> None:
+        """Time one device sync by itself, then start the next mark."""
+        t0 = time.perf_counter()
+        self.sync()
+        now = time.perf_counter()
+        self.totals[name] = self.totals.get(name, 0.0) + (now - t0)
+        self._t = now
 
     def _rows(self, n_steps: int, wall: float):
         named = 0.0
@@ -203,12 +190,19 @@ class PathIntegrator:
 
     def _update_filter(self, v_body, n_ref):
         """One noisy measurement of the reference normal, then a filter update."""
+        prof = self._prof
         d_norm = np.linalg.norm(v_body)
+        if prof is not None:
+            prof.lap("velocity norm")
         if d_norm <= 1e-9:
             return
         z = sample_vmf(n_ref, self.kappa_sens, self._rng)
+        if prof is not None:
+            prof.lap("sample_vmf")
         self._vmf_state = step_filter(
             self._vmf_state, z, self.kappa_sens, self.kappa_w)
+        if prof is not None:
+            prof.lap("predict+update")
 
     def default_refresh_mask(self, n_steps, timing="free", segment_starts=None):
         """Refresh schedule.
@@ -261,6 +255,8 @@ class PathIntegrator:
         #estimate of the floor and checks that it is not upside down
         if reset_prior: #True at the start of a new segment
             self._vmf_state = uniform_prior() #concentration = 0 for uniform prior
+        if prof is not None:
+            prof.lap("ref setup")
         #one step of the filter
         self._update_filter(v_body, n_ref)
         #copy of direction of the mean of the von mises fisher distribution
@@ -268,11 +264,15 @@ class PathIntegrator:
         if np.dot(n_hat, g_hat) > 0:
             n_hat = -n_hat
             self.n_gravity_flips += 1
+        if prof is not None:
+            prof.lap("copy+flip")
 
         #build rotation matrix and rotate velocity. R is kept until the held normal changes.
         if refresh or self._n_held is None:
             self._n_held = n_hat.copy()
             self._R = build_rotation_matrix(self._n_held)
+            if prof is not None:
+                prof.lap("rotation matrix")
         v_alloc = self._R @ v_body #allocentric velocity
 
         target_speed_rad = v_alloc * self.scale  # rad/step
@@ -283,7 +283,8 @@ class PathIntegrator:
         if prof is None:
             self.backend.step(drive)
         else:
-            prof.stop("plane filter")
+            prof.lap("rotate+pi_star")
+            prof.take_sync("plane sync")
             prof.start()
             S_tot = torch.mean(self.backend.S, dim=0)
             prof.stop("torch.mean")
