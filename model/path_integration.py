@@ -197,10 +197,12 @@ class PathIntegrator:
         n_ref = n_true if n_true is not None else self._true_n_hat
         n_ref = np.asarray(n_ref, dtype=float)
         n_ref = n_ref / np.linalg.norm(n_ref)
-
-        if reset_prior:
-            self._vmf_state = uniform_prior()
+        #estimate of the floor and checks that it is not upside down
+        if reset_prior: #True at the start of a new segment
+            self._vmf_state = uniform_prior() #concentration = 0 for uniform prior
+        #one step of the filter
         self._update_filter(v_body, n_ref)
+        #copy of direction of the mean of the von mises fisher distribution
         n_hat = np.asarray(self._vmf_state.mu, dtype=float).copy()
         if np.dot(n_hat, g_hat) > 0:
             n_hat = -n_hat
@@ -213,7 +215,7 @@ class PathIntegrator:
         v_alloc = self._R @ v_body #allocentric velocity
 
         target_speed_rad = v_alloc * self.scale  # rad/step
-        # backend.step expects rad per unit TIME (theta_dot_at's convention)
+        # backend.step expects rad per unit time
         # and one component per torus axis (π star after R maps n̂ -> ẑ)
         drive = pi_star(target_speed_rad, self.qan.manifold.dim) / self.qan.dt
         self.backend.step(drive)
@@ -278,10 +280,14 @@ class PathIntegrator:
         if flat_indices is not None and ratemap_bins > 0:
             total_bins = ratemap_bins ** ratemap_ndim
             _acc = self.backend.allocate_ratemap(total_bins, sub_t)
-
-        _shuf = None
+        
+        #set up the shuffled rate maps once,
+        _shuf = None #zero tensor for the shuffle sums
+        _shuf_flat = _shuf_lags = None #bin the agent is in and how far the shuffle is
         if n_shuffle > 0 and lags is not None and _acc is not None:
             _shuf = self.backend.allocate_shuffle_ratemap(total_bins, n_null, n_shuffle)
+            _shuf_flat, _shuf_lags = self.backend.upload_shuffle_index(
+                flat_indices, lags)
 
         # Strided (position, activity) trace for volumetric inter-field distance.
         # Only the scored subsample: the full sheet does not fit.
@@ -338,17 +344,30 @@ class PathIntegrator:
 
             if _acc is not None:
                 self.backend.record_ratemap(_acc, int(flat_indices[t]), sub_t, activity)
-            if _shuf is not None:
-                self.backend.record_shuffle_ratemap(
-                    _shuf, flat_indices, t, lags, null_t, activity)
 
+            #If the chunk is full or last step of trajectory, decode and dump to CPU
             filled = t - chunk_start + 1
-            # chunk full (or last step) -> decode it all at once and dump to CPU.
-            # The tracker keeps its state between calls, so chunks join up.
             if filled == chunk or t == T - 1:
                 start = chunk_start
+                
+                #when this run is not scoring shuffles skip
+                if _shuf is not None:
+                    pos = 0
+                    
+                    #loop through steps in the chunk
+                    while pos < filled:
+                        width = min(4096, filled - pos)
+                        #Adds this piece of the chunk into the shifted sums.
+                        self.backend.record_shuffle_chunk(
+                            _shuf, _shuf_flat, _shuf_lags, start + pos,
+                            _S_chunk[pos:pos + width], null_t)
+                        pos += width
+                        
+                #takes the stored sheet activity, moves it to the CPU (only pr chuk so fine), and find where the bump is.
                 theta_history[start:t + 1] = self.backend.track_batch(
                     _S_chunk[:filled], snapshot_rows=snap_rows, time0=start)
+                
+                #keep a thin record of the activity for the grid-field measurement
                 if _field_act is not None:
                     times = np.arange(start, t + 1)
                     keep = (times % _field_stride) == 0

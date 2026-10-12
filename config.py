@@ -71,7 +71,7 @@ class ExperimentConfig:
     n_steps:          int   = 3000 #Defult timesteps
     seed:             int   = 0
     grid_spacing:     float = 0.15    # metres per field period; 2 m arena is 13.33 periods 
-    target_speed_rad_per_time: float = 0.004  # desired bump speed
+    target_speed_rad_per_time: float = 0.008  # desired bump speed, rad per unit time
 
     omega_std:        float = 0.03
     #NOTE: How many of this is needed, look at this one more time then

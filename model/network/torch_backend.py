@@ -400,7 +400,9 @@ class TorchBackend:
 
     def track_batch(self, S_chunk: torch.Tensor, snapshot_rows=None,
                     time0: int = 0) -> np.ndarray:
-        """Decode a (T, N) activity chunk; tracker state carries across frames."""
+        """Decode a (T, N) activity chunk. Tracker state carries across frames.
+        Hpapens pr chunk, not each step so fine now to do on the cpu
+        """
         vols = S_chunk.detach().cpu().numpy().reshape((-1,) + self.shape)
         if not snapshot_rows:
             return self.tracker.advance_frames(vols)
@@ -545,18 +547,30 @@ class TorchBackend:
         return torch.zeros((n_shuffle, total_bins, n_neurons),
                            dtype=torch.float32, device=self.device)
  
-    def record_shuffle_ratemap(self, shuf_sums, flat_indices, t: int,
-                               lags, sub_t=None, activity=None) -> None:
-        """Accumulate time-shifted activity for every shuffle in one write."""
+    def upload_shuffle_index(self, flat_indices, lags) -> tuple:
+        """Copy the bin index and the lags to the device once for the whole run."""
+        device = self.device
+        flat = torch.as_tensor(np.asarray(flat_indices), dtype=torch.long, device=device)
+        lags_t = torch.as_tensor(np.asarray(lags), dtype=torch.long, device=device)
+        return flat, lags_t
+
+    def record_shuffle_chunk(self, shuf_sums, flat, lags_t, t0: int, buf,
+                             sub_t=None) -> None:
+        """Add a block of steps to the shifted sums in one scatter.
+        """
         with torch.no_grad():
-            s = self.sheet_mean() if activity is None else activity
+            device, C = buf.device, buf.shape[0]
+            T = flat.shape[0]
+            n_shuf = lags_t.shape[0]
             if sub_t is not None:
-                s = s[sub_t]
-            lags_t = torch.as_tensor(np.asarray(lags), device=shuf_sums.device, dtype=torch.long)
-            flat = torch.as_tensor(np.asarray(flat_indices), device=shuf_sums.device, dtype=torch.long)
-            shifted = (int(t) + lags_t) % flat.shape[0]
-            bins = flat[shifted]
-            rows = torch.arange(bins.shape[0], device=shuf_sums.device)
-            values = s.unsqueeze(0).expand(bins.shape[0], s.shape[0])
-            shuf_sums.index_put_((rows, bins), values, accumulate=True)
+                buf = buf[:, sub_t]
+            N = buf.shape[1]
+            B = shuf_sums.shape[1]
+
+            t_idx = (torch.arange(t0, t0 + C, device=device)[:, None]
+                     + lags_t[None, :]) % T
+            shifted = flat[t_idx]
+            row = (torch.arange(n_shuf, device=device)[None, :] * B + shifted).T.reshape(-1)
+            val = buf.unsqueeze(0).expand(n_shuf, C, N).reshape(-1, N)
+            shuf_sums.view(-1, N).index_add_(0, row, val)
 
