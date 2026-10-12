@@ -415,25 +415,16 @@ class TorchBackend:
         """Decode a (T, N) activity chunk. Tracker state carries across frames.
         Hpapens pr chunk, not each step so fine now to do on the cpu
         """
-        prof = getattr(self, "_prof", None)
-        if prof is not None:
-            prof.start()
         vols = S_chunk.detach().cpu().numpy().reshape((-1,) + self.shape)
-        if prof is not None:
-            prof.stop("track .cpu()")
-            prof.start()
         if not snapshot_rows:
-            out = self.tracker.advance_frames(vols)
-        else:
-            out = np.empty((len(vols), self.d), dtype=np.float64)
-            for i, frame in enumerate(vols):
-                out[i] = self.tracker.advance(frame)
-                row = snapshot_rows.get(time0 + i)
-                if row is not None:
-                    self.snapshots[row] = frame
-                    self.snapshot_cells[row] = self.tracker.c_prev
-        if prof is not None:
-            prof.stop("track numpy")
+            return self.tracker.advance_frames(vols)
+        out = np.empty((len(vols), self.d), dtype=np.float64)
+        for i, frame in enumerate(vols):
+            out[i] = self.tracker.advance(frame)
+            row = snapshot_rows.get(time0 + i)
+            if row is not None:
+                self.snapshots[row] = frame
+                self.snapshot_cells[row] = self.tracker.c_prev
         return out
 
     def form_lattice(self, theta_0, settle=3000, min_peakedness=0.0):
@@ -493,25 +484,14 @@ class TorchBackend:
             #mean over populations
             S_tot = torch.mean(self.S, dim=0).squeeze()
             v = S_tot.reshape(shape)
-            prof = getattr(self, "_prof", None)
-            if prof is not None:
-                prof.start()
             vol = v.detach().cpu().numpy()
-            if prof is not None:
-                prof.stop("volume .cpu()")
 
             #local com
-            if prof is not None:
-                prof.start()
             pos[t] = self.tracker.advance(vol)
-            if prof is not None:
-                prof.stop("tracker advance")
             if on_volume is not None:
                 on_volume(t, vol)
 
             if t % display_stride == 0: #store if display is taken
-                if prof is not None:
-                    prof.start()
                 stacked = torch.stack([
                     v.sum(dim=tuple(j for j in range(d) if j != ax))
                     for ax in range(d)
@@ -519,8 +499,6 @@ class TorchBackend:
                 self.display_marginals[t // display_stride] = (
                     stacked.detach().cpu().numpy()
                 )
-                if prof is not None:
-                    prof.stop("display marginals")
             if t % snapshot_stride == 0: #store if snapshot is taken
                 si = t // snapshot_stride
                 self.snapshots[si] = vol
@@ -531,13 +509,7 @@ class TorchBackend:
         #3. Return 
         out = np.mod(pos, 2 * np.pi) #wrapped position of the com
         if return_states:
-            prof = getattr(self, "_prof", None)
-            if prof is not None:
-                prof.start()
-            states = buf.detach().cpu().numpy()
-            if prof is not None:
-                prof.stop("states .cpu()")
-            return out, states
+            return out, buf.detach().cpu().numpy()
         return out
 
     def simulate(self, trajectory: np.ndarray, settle=3000,
