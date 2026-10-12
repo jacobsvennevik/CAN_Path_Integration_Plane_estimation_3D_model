@@ -233,7 +233,8 @@ class BaseExperiment:
         )
 
     def run(self, world_pos, v_body_seq, torus_gt, g_vec,
-            n_true_seq=None, segment_starts=None, plane=None) -> ExperimentResult:
+            n_true_seq=None, segment_starts=None, plane=None,
+            profile: bool = False) -> ExperimentResult:
         plane = self.config.plane if plane is None else plane
         bins = self.config.experiment.ratemap_bins
         env_size = self.config.experiment.env_size
@@ -297,6 +298,7 @@ class BaseExperiment:
             world_pos=world_pos if ndim == 3 else None,
             field_stride=field_stride,
             max_trace_bytes=max_trace_bytes,
+            profile=profile,
         )
 
         kappa = np.asarray(integrator.history["kappa"], dtype=float)

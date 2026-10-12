@@ -1,3 +1,4 @@
+import time
 import warnings
 
 import numpy as np
@@ -57,6 +58,61 @@ def pi_star(v_alloc: np.ndarray, dim: int = None) -> np.ndarray:
 
 
 KAPPA_W_DEFAULT = 1e4
+
+
+class _Prof:
+    """Accumulates wall time around named pieces of one run.
+
+    Synchronizes the device the network is already on, so a GPU op is finished
+    before the clock stops. No device is selected here.
+    """
+
+    def __init__(self, device):
+        self.device = device
+        self.totals = {}
+        self._t = 0.0
+
+    def sync(self) -> None:
+        kind = self.device.type
+        if kind == "cuda":
+            torch.cuda.synchronize()
+        elif kind == "mps":
+            torch.mps.synchronize()
+
+    def start(self) -> None:
+        self.sync()
+        self._t = time.perf_counter()
+
+    def stop(self, name: str) -> None:
+        self.sync()
+        self.totals[name] = self.totals.get(name, 0.0) + (time.perf_counter() - self._t)
+
+    def report(self, n_steps: int, wall: float) -> None:
+        print(f"profile {n_steps} steps on {self.device}")
+        named = 0.0
+        rows = sorted(self.totals.items(), key=lambda kv: kv[1], reverse=True)
+        for name, seconds in rows:
+            named += seconds
+            print(f"  {name:<24} {seconds:8.3f} s   {seconds / n_steps * 1e3:7.3f} ms/step")
+        other = wall - named
+        print(f"  {'other':<24} {other:8.3f} s   {other / n_steps * 1e3:7.3f} ms/step")
+        print(f"  {'total':<24} {wall:8.3f} s   {wall / n_steps * 1e3:7.3f} ms/step", flush=True)
+
+    def progress(self, done: int, total: int, wall: float) -> None:
+        """One line of cumulative rates, printed when a chunk finishes."""
+        def ms(name):
+            return self.totals.get(name, 0.0) / done * 1e3
+
+        means = ms("torch.mean") + ms("sheet_mean")
+        print(
+            f"step {done}/{total}  {wall / done * 1e3:.2f} ms/step  "
+            f"network {ms('step_from_shared_state'):.2f}  "
+            f"means {means:.2f}  "
+            f"ratemap {ms('record_ratemap'):.2f}  "
+            f"shuffle {ms('record_shuffle_chunk'):.2f}  "
+            f"track {ms('track_batch'):.2f}",
+            flush=True,
+        )
 
 
 def trace_nbytes(n_steps: int, n_cells: int, stride: int) -> int:
@@ -126,6 +182,7 @@ class PathIntegrator:
         }
         self.ratemap_sums = None
         self.ratemap_counts = None
+        self._prof = None
 
     def warmup(self, n_steps: int = 100):
         """Let the lattice settle, then lock the tracker on.
@@ -193,6 +250,9 @@ class PathIntegrator:
 
     def _advance(self, v_body, g_hat, n_true=None, refresh=True, reset_prior=False):
         """One step of the filter and the network. No decode, no history."""
+        prof = self._prof
+        if prof is not None:
+            prof.start()
         v_body = np.asarray(v_body, dtype=float)
         n_ref = n_true if n_true is not None else self._true_n_hat
         n_ref = np.asarray(n_ref, dtype=float)
@@ -218,7 +278,17 @@ class PathIntegrator:
         # backend.step expects rad per unit time
         # and one component per torus axis (π star after R maps n̂ -> ẑ)
         drive = pi_star(target_speed_rad, self.qan.manifold.dim) / self.qan.dt
-        self.backend.step(drive)
+        prof = self._prof
+        if prof is None:
+            self.backend.step(drive)
+        else:
+            prof.stop("plane filter")
+            prof.start()
+            S_tot = torch.mean(self.backend.S, dim=0)
+            prof.stop("torch.mean")
+            prof.start()
+            self.backend.step_from_shared_state(S_tot, drive)
+            prof.stop("step_from_shared_state")
         return n_hat, v_alloc, target_speed_rad
 
     def run(self, v_body_sequence: np.ndarray, g: np.ndarray,
@@ -232,7 +302,8 @@ class PathIntegrator:
             world_pos: np.ndarray = None,
             field_stride: int = None,
             max_trace_bytes: int = None,
-            snapshot_stride: int = None) -> np.ndarray:
+            snapshot_stride: int = None,
+            profile: bool = False) -> np.ndarray:
         """
         Run the full pipeline over a pre-computed velocity sequence.
 
@@ -244,6 +315,8 @@ class PathIntegrator:
         dev = self.backend.device
         N = self.backend.S.shape[1]
         theta_history = np.zeros((T, torus_dim)) #place to store decoded positions
+        self._prof = _Prof(dev) if profile else None
+        prof = self._prof
 
         if refresh_mask is None:
             refresh_mask = self.default_refresh_mask(T)
@@ -327,13 +400,18 @@ class PathIntegrator:
             snap_rows = {int(ts): i for i, ts in enumerate(times)}
 
         chunk_start = 0 #first step currently held in _S_chunk
+        wall0 = time.perf_counter() if prof is not None else 0.0
 
         for t in range(T):
             v_body = np.asarray(v_body_sequence[t], dtype=float)
             n_hat, _, _ = self._advance(
                 v_body, g_hat, n_true=n_true_seq[t], refresh=bool(refresh_mask[t]),
                 reset_prior=(t in reset_at))
+            if prof is not None:
+                prof.start()
             activity = self.backend.sheet_mean()
+            if prof is not None:
+                prof.stop("sheet_mean")
             # stash the bump state on-device, no .cpu() here
             _S_chunk[t - chunk_start] = activity
 
@@ -343,7 +421,11 @@ class PathIntegrator:
             _h_kappa[t] = float(self._vmf_state.kappa)
 
             if _acc is not None:
+                if prof is not None:
+                    prof.start()
                 self.backend.record_ratemap(_acc, int(flat_indices[t]), sub_t, activity)
+                if prof is not None:
+                    prof.stop("record_ratemap")
 
             #If the chunk is full or last step of trajectory, decode and dump to CPU
             filled = t - chunk_start + 1
@@ -355,6 +437,8 @@ class PathIntegrator:
                     pos = 0
                     
                     #loop through steps in the chunk
+                    if prof is not None:
+                        prof.start()
                     while pos < filled:
                         width = min(4096, filled - pos)
                         #Adds this piece of the chunk into the shifted sums.
@@ -362,13 +446,21 @@ class PathIntegrator:
                             _shuf, _shuf_flat, _shuf_lags, start + pos,
                             _S_chunk[pos:pos + width], null_t)
                         pos += width
+                    if prof is not None:
+                        prof.stop("record_shuffle_chunk")
                         
                 #takes the stored sheet activity, moves it to the CPU (only pr chuk so fine), and find where the bump is.
+                if prof is not None:
+                    prof.start()
                 theta_history[start:t + 1] = self.backend.track_batch(
                     _S_chunk[:filled], snapshot_rows=snap_rows, time0=start)
+                if prof is not None:
+                    prof.stop("track_batch")
                 
                 #keep a thin record of the activity for the grid-field measurement
                 if _field_act is not None:
+                    if prof is not None:
+                        prof.start()
                     times = np.arange(start, t + 1)
                     keep = (times % _field_stride) == 0
                     if np.any(keep):
@@ -381,7 +473,17 @@ class PathIntegrator:
                         _field_pos[_field_write:_field_write + n_keep] = (
                             world_pos[times[keep]])
                         _field_write += n_keep
+                    if prof is not None:
+                        prof.stop("field trace")
                 chunk_start = t + 1
+                if prof is not None:
+                    prof.sync()
+                    prof.progress(t + 1, T, time.perf_counter() - wall0)
+
+        if prof is not None:
+            prof.sync()
+            prof.report(T, time.perf_counter() - wall0)
+            self._prof = None
 
         self.history["n_hat"] = _h_n_hat
         self.history["n_held"] = _h_n_held
