@@ -170,6 +170,7 @@ class PathIntegrator:
         n_ref = n_true if n_true is not None else self._true_n_hat
         n_ref = np.asarray(n_ref, dtype=float)
         n_ref = n_ref / np.linalg.norm(n_ref)
+        
         #estimate of the floor and checks that it is not upside down
         if reset_prior: #True at the start of a new segment
             self._vmf_state = uniform_prior() #concentration = 0 for uniform prior
@@ -218,6 +219,7 @@ class PathIntegrator:
         N = self.backend.S.shape[1]
         theta_history = np.zeros((T, torus_dim)) #place to store decoded positions
 
+        #Set up some lookup tables, tell a later step when the the pkane estimate might change
         if refresh_mask is None:
             refresh_mask = self.default_refresh_mask(T)
         refresh_mask = np.asarray(refresh_mask, dtype=bool)
@@ -237,7 +239,7 @@ class PathIntegrator:
         chunk = min(self.decode_chunk, T)
         _S_chunk = torch.empty((chunk, N), dtype=torch.float32, device=dev)
 
-        # neuron subsample → torch index tensor
+        # neuron subsample to torch index tensor
         sub_t = (torch.tensor(sub_idx, dtype=torch.long, device=self.backend.device)
                  if sub_idx is not None else None)
         n_neurons = len(sub_idx) if sub_idx is not None else self.backend.S.shape[1]
@@ -301,8 +303,11 @@ class PathIntegrator:
 
         chunk_start = 0 #first step currently held in _S_chunk
 
+        #Main loop through the timesteps
         for t in range(T):
             v_body = np.asarray(v_body_sequence[t], dtype=float)
+            
+            #One step of the filter and the network
             n_hat, _, _ = self._advance(
                 v_body, g_hat, n_true=n_true_seq[t], refresh=bool(refresh_mask[t]),
                 reset_prior=(t in reset_at))

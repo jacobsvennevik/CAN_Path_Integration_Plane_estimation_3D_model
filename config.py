@@ -24,14 +24,7 @@ class NetworkConfig:
     dt:                 float = 0.25 #forward-Euler step size, same units as tau
     tau:                float = 5.0  # neural time constant; dt/tau ≤ 0.125 at tau=2  NOTE: tau is 5.0 now, not 2
     velocity_gain:      float = 2.626  # bump speed vs commanded speed; Optuna searches this in the 2-D sweep
-
-    # Undriven settle. None is an error: experiments set this. There is no formula.
-    # Frozen networks (trial 69) set this explicitly; do not default to 4000.
     settle_steps:       int | None = None
-
-    #flag related to building dense numoy matricies or skipping that.
-    # The dense matrix is gone; notebook 3 still passes the flag, and it is ignored.
-    build_connectivity: bool  = False
 
     def __post_init__(self):
         self.neurons = int(self.neurons)

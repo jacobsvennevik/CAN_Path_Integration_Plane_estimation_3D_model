@@ -1,5 +1,6 @@
 """Qi and Yartsev single-cell lattice fit"""
 import os
+import time
 import numpy as np
 import torch
 from scipy import sparse
@@ -538,6 +539,8 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
     Fits one spacing per cell. It picks one spacing for the cell
     and lets orientation and phase be chosen separately on every route.
     """
+    # Time the prepare
+    t0 = time.perf_counter()
     #setup everything
     positions = np.asarray(positions, dtype=float)
     activity = np.asarray(activity, dtype=float)
@@ -578,6 +581,9 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
     if workers > 1:
         from joblib import Parallel, delayed
         parallel = Parallel(n_jobs=workers)
+    # Time the prepare
+    t1 = time.perf_counter()
+    print(f"qy prepare {t1 - t0:.2f}s")
 
     #Search each route for the best spacing, orientation, and phase.
     for r_i, route in enumerate(routes):
@@ -605,16 +611,23 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
             shuf_totals[:, s_i] += best_shuf
             weight = fired[r_i].astype(float)
             loo_weighted[:, s_i] += _loo_z(best_shuf) * weight
+    # Time the search
+    t2 = time.perf_counter()
+    print(f"qy search {t2 - t1:.2f}s")
 
     for route, item in zip(routes, drawn):
         route["n_spikes"] = item["n_spikes"]
     mean_loo = _weighted_mean(loo_weighted, fired)
-    return _assemble(
+    out = _assemble(
         routes, spacings, orientations, n_target, n_shuffles, n_cells,
         real_ll, z_route, shuf_totals, mean_loo,
         real_orient, real_phase,
         fired, spikes, return_spikes,  # CHANGED: was drawn[0]["spikes"]
     )
+    # Time the assemble
+    t3 = time.perf_counter()
+    print(f"qy assemble {t3 - t2:.2f}s")
+    return out
 
 
 def qy_fit(traj, field_pos, field_act, stride, **kwargs):

@@ -126,7 +126,6 @@ class TorchBackend:
         try:
             self._step_compiled = torch.compile(
                 self._step_impl,
-                mode="reduce-overhead",
                 dynamic=False,
             )
         except Exception as exc:

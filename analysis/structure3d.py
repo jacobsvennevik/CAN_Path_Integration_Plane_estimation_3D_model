@@ -1,4 +1,5 @@
 """3-D structure scores (Grieves χ) and shuffle z-scores."""
+import time
 import warnings
 import numpy as np
 
@@ -321,7 +322,8 @@ def score_3d_from_map(
     """
     bins    = sums.shape[0]
     n_total = sums.shape[-1]
-
+    # Time the rate-map
+    t0 = time.perf_counter()
     # which neurons are we scoring
     scored_idx = np.where(active_mask)[0] if active_mask is not None \
                  else np.arange(n_total)
@@ -336,7 +338,9 @@ def score_3d_from_map(
     # turn the totals into a smoothed rate map
     sums_sub = sums[..., scored_idx].copy()
     f        = _rate_map_from_accumulator(sums_sub, counts, sigma=sigma)
-
+    # Time the rate-map
+    t1 = time.perf_counter()
+    print(f"rate map {t1 - t0:.2f}s")
     # how much of the box did we actually cover, and can we trust it
     p   = counts / (counts.sum() + 1e-30)
     occ = float((p > 0).mean())
@@ -356,20 +360,29 @@ def score_3d_from_map(
         rmax     = (2 * bins - 1) // 2
         sinfo    = _spatial_info(p, f)
         sidx     = _sparsity_idx(p, f)
+        # Time the spatial info step
+        t2 = time.perf_counter()
+        print(f"spatial info {t2 - t1:.2f}s")
         sinfo_z, sidx_z = None, None
         if shuf_sums is not None:
             sinfo_z, sidx_z = _online_shuffle_zscores(
                 shuf_sums, scored_idx, counts, p, sigma, sinfo, sidx)
-        out = dict(
+        # Time shuffle
+        t3 = time.perf_counter()
+        print(f"shuffle {t3 - t2:.2f}s")
+        ifd = _ifd_for_scored(positions, activity, scored_idx, grid_spacing, env_size)
+        # Time the inter-field distance
+        t4 = time.perf_counter()
+        print(f"inter-field distance {t4 - t3:.2f}s")
+        return dict(
             chi=np.full((3, n_scored), np.nan),
             mra=np.full((n_scored, rmax), np.nan),
             ring_found=np.zeros(n_scored, bool),
             sinfo=sinfo, sidx=sidx, sinfo_z=sinfo_z, sidx_z=sidx_z,
-            ifd=_ifd_for_scored(positions, activity, scored_idx, grid_spacing, env_size),
+            ifd=ifd,
             occupancy=occ, reliable=False,
             scored_idx=scored_idx, bins=bins,
         )
-        return out
 
     elif occ < occ_warn:
         warnings.warn(
@@ -382,21 +395,32 @@ def score_3d_from_map(
     # the spatial info numbers
     sinfo = _spatial_info(p, f)
     sidx  = _sparsity_idx(p, f)
-
+    # Time the spatial info step
+    t2 = time.perf_counter()
+    print(f"spatial info {t2 - t1:.2f}s")
     sinfo_z, sidx_z = None, None
     if shuf_sums is not None:
         sinfo_z, sidx_z = _online_shuffle_zscores(
             shuf_sums, scored_idx, counts, p, sigma, sinfo, sidx)
-
+    # Time shuffle
+    t3 = time.perf_counter()
+    print(f"shuffle {t3 - t2:.2f}s")
     # the structure scores, one neuron at a time
     chi_out, mra_out, ring_found = _stream_structure_scores(f, bins, n_jobs=n_jobs)
+    # Time the structure scores
+    t4 = time.perf_counter()
+    print(f"structure {t4 - t3:.2f}s")
+    ifd = _ifd_for_scored(positions, activity, scored_idx, grid_spacing, env_size)
+    # Time the inter-field distance
+    t5 = time.perf_counter()
+    print(f"inter-field distance {t5 - t4:.2f}s")
 
     return dict(
         chi=chi_out, mra=mra_out,
         ring_found=ring_found,
         sinfo=sinfo, sidx=sidx,
         sinfo_z=sinfo_z, sidx_z=sidx_z,
-        ifd=_ifd_for_scored(positions, activity, scored_idx, grid_spacing, env_size),
+        ifd=ifd,
         occupancy=occ, reliable=reliable,
         scored_idx=scored_idx, bins=bins,
     )
