@@ -14,6 +14,7 @@ N_PHASE = 14
 N_SHUFFLES = 200
 N_TARGET = 500
 ORIENT_BATCH = 4 # A few orientations batches at once
+SPACING_BATCH = 4 # A few spacings share one multiply
 
 
 def plane_chart(world_pos, n_fit=None, x_home=None, basis=None):
@@ -383,15 +384,18 @@ def _prepare_spikes(activity, seed, routes, n_target, n_shuffles):
     return prepared, spikes 
 
 
-def _score_pair(xy, spacing, orientations, n_phase, drawn, n_shuffles, counts=None):
-    """Best orientation and phase for one route at one spacing.
+def _score_spacings(xy, spacings, orientations, n_phase, drawn, n_shuffles, counts=None):
+    """Best orientation and phase for one route at each spacing.
 
     ``counts`` is the route's real and shuffled spike tables, already on the
-    scoring device. Orientations are scored a few at a time.
+    scoring device. Orientations are scored a few at a time. The spacings
+    passed in share one multiply.
     """
     device = _scoring_device()
     n_cells = int(drawn["n_spikes"].shape[0])
     n_shuffles = int(n_shuffles)
+    spacings = np.atleast_1d(np.asarray(spacings, dtype=float))
+    n_spacings = len(spacings)
     if counts is None:
         real = _to_sparse(drawn["real"], device)
         shuf = _to_sparse(drawn["shuffled"], device)
@@ -403,41 +407,54 @@ def _score_pair(xy, spacing, orientations, n_phase, drawn, n_shuffles, counts=No
         np.ascontiguousarray(drawn["n_spikes"], dtype=np.float32)
     ).to(device)
 
-    best_real = torch.full((n_cells,), -torch.inf, device=device)
-    best_phase = torch.full((n_cells,), -1, dtype=torch.long, device=device)
-    best_orient = torch.full((n_cells,), -1, dtype=torch.long, device=device)
-    best_shuf = torch.full((n_shuffles, n_cells), -torch.inf, device=device)
+    best_real = torch.full((n_spacings, n_cells), -torch.inf, device=device)
+    best_phase = torch.full((n_spacings, n_cells), -1, dtype=torch.long, device=device)
+    best_orient = torch.full((n_spacings, n_cells), -1, dtype=torch.long, device=device)
+    best_shuf = torch.full((n_spacings, n_shuffles, n_cells), -torch.inf, device=device)
 
     with torch.inference_mode():
         #Try orientations a few at a time.
         for start in range(0, len(orientations), ORIENT_BATCH):
             angles = orientations[start:start + ORIENT_BATCH]
-            #Build all phases for these orientations.
-            g = _lattice_g(xy, spacing, angles, n_phase=n_phase)
-            n_phase_grid = g.shape[1]
-            #log g turned to one row per sample, one column per orientation and phase
-            log_g = torch.log(g).permute(2, 0, 1).reshape(g.shape[2], -1).contiguous()
-            #Sum the lattice fields at every point to get occupancy.
-            occupancy = g.sum(dim=-1)
+            log_parts = []
+            occ_parts = []
+            #Build all phases for these orientations, at each spacing in the chunk.
+            for spacing in spacings:
+                g = _lattice_g(xy, float(spacing), angles, n_phase=n_phase)
+                n_phase_grid = g.shape[1]
+                n_orient = g.shape[0]
+                #log g turned to one row per sample, one column per orientation and phase
+                log_parts.append(
+                    torch.log(g).permute(2, 0, 1).reshape(g.shape[2], -1))
+                #Sum the lattice fields at every point to get occupancy.
+                occ_parts.append(g.sum(dim=-1))
+            log_g = torch.cat(log_parts, dim=1).contiguous()
+            occupancy = torch.stack(occ_parts, dim=0)
             #Find the best phase, then the best orientation in this group.
-            real_term = torch.sparse.mm(real, log_g).reshape(n_cells, -1, n_phase_grid)
+            real_term = torch.sparse.mm(real, log_g).reshape(
+                n_cells, n_spacings, n_orient, n_phase_grid)
             ll = log_likelihood_from_parts(
-                n_spikes[:, None, None], occupancy[None, :, :], real_term)
+                n_spikes[:, None, None, None], occupancy[None], real_term)
             ll_phase, phase_i = torch.max(ll, dim=-1)
             ll_o, o_local = torch.max(ll_phase, dim=-1)
+            ll_o = ll_o.transpose(0, 1)
+            o_local = o_local.transpose(0, 1)
             # better is true for each cell whose likelihood beat the best orientation so far
             better = ll_o > best_real
-            chosen_phase = phase_i[torch.arange(n_cells, device=device), o_local]
+            chosen_phase = torch.gather(
+                phase_i, 2, o_local.transpose(0, 1).unsqueeze(-1),
+            ).squeeze(-1).transpose(0, 1)
             best_real = torch.where(better, ll_o, best_real)
             best_phase = torch.where(better, chosen_phase, best_phase)
             best_orient = torch.where(better, o_local + start, best_orient)
 
             #Calculate LL for each shuffle, best phase and orientation.
             terms = torch.sparse.mm(shuf, log_g).reshape(
-                n_shuffles, n_cells, -1, n_phase_grid)
+                n_shuffles, n_cells, n_spacings, n_orient, n_phase_grid)
             ll_s = log_likelihood_from_parts(
-                n_spikes[None, :, None, None], occupancy[None, None, :, :], terms)
-            best_shuf = torch.maximum(best_shuf, ll_s.amax(dim=(-1, -2)))
+                n_spikes[None, :, None, None, None], occupancy[None, None], terms)
+            best_shuf = torch.maximum(
+                best_shuf, ll_s.amax(dim=(-1, -2)).permute(2, 0, 1))
 
     return (
         best_real.cpu().numpy(),
@@ -445,6 +462,13 @@ def _score_pair(xy, spacing, orientations, n_phase, drawn, n_shuffles, counts=No
         best_orient.cpu().numpy().astype(int),
         best_phase.cpu().numpy().astype(int),
     )
+
+
+def _score_pair(xy, spacing, orientations, n_phase, drawn, n_shuffles, counts=None):
+    """Best orientation and phase for one route at one spacing."""
+    real, shuf, orient, phase = _score_spacings(
+        xy, [spacing], orientations, n_phase, drawn, n_shuffles, counts)
+    return real[0], shuf[0], orient[0], phase[0]
 
 
 def _pair_task(r_i, s_i, xy, spacing, orientations, n_phase, drawn, n_shuffles, counts=None):
@@ -593,15 +617,30 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
                 _to_sparse(drawn[r_i]["real"], device),
                 _to_sparse(drawn[r_i]["shuffled"], device),
             )
+        if parallel is None:
+            #Score each spacing in chunks
+            for s0 in range(0, n_spacings, SPACING_BATCH):
+                chunk = spacings[s0:s0 + SPACING_BATCH]
+                best_real, best_shuf, best_orient, best_phase = _score_spacings(
+                    route["xy"], chunk, orientations, n_phase,
+                    drawn[r_i], n_shuffles, counts)
+                
+                #writes one spacing's scores into the tables for the whole search.
+                for j, s_i in enumerate(range(s0, s0 + len(chunk))):
+                    real_ll[s_i, r_i] = best_real[j]
+                    real_orient[s_i, r_i] = best_orient[j]
+                    real_phase[s_i, r_i] = best_phase[j]
+                    z_route[s_i, r_i] = _z_against(best_real[j], best_shuf[j])
+                    shuf_totals[:, s_i] += best_shuf[j]
+                    weight = fired[r_i].astype(float)
+                    loo_weighted[:, s_i] += _loo_z(best_shuf[j]) * weight
+            continue
         pairs = [
             (r_i, s_i, route["xy"], float(spacing), orientations, n_phase,
              drawn[r_i], n_shuffles, counts)
             for s_i, spacing in enumerate(spacings)
         ]
-        if parallel is None or len(pairs) <= 1:
-            scored = [_pair_task(*item) for item in pairs]
-        else:
-            scored = parallel(delayed(_pair_task)(*item) for item in pairs)
+        scored = parallel(delayed(_pair_task)(*item) for item in pairs)
 
         for _, s_i, (best_real, best_shuf, best_orient, best_phase) in scored:
             real_ll[s_i, r_i] = best_real
