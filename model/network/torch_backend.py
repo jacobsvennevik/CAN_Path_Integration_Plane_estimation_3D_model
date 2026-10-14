@@ -122,6 +122,10 @@ class TorchBackend:
             self.device = self._get_torch_device()
         else:
             self.device = torch.device(self.device)
+        if self.device.type == "cuda":
+            print(f"integrator device {self.device}  {torch.cuda.get_device_name(self.device)}")
+        else:
+            print(f"integrator device {self.device}")
         self._init_torch_backend()
         try:
             self._step_compiled = torch.compile(
