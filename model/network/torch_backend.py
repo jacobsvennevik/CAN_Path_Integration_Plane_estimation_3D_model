@@ -12,15 +12,6 @@ from model.metrics import wrapped_angle_diff
 from model.network.CAN3D import kernel_field_on_grid, torus_grid
 
 
-def pick_torch_device():
-    """MPS, then CUDA, then CPU."""
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    return torch.device("cpu")
-
-
 class BumpTracker:
     """Follows one bump on the n^d torus by local centre of mass.
 
@@ -128,9 +119,13 @@ class TorchBackend:
 
     def __post_init__(self):
         if self.device is None:
-            self.device = pick_torch_device()
+            self.device = self._get_torch_device()
         else:
             self.device = torch.device(self.device)
+        if self.device.type == "cuda":
+            print(f"integrator device {self.device}  {torch.cuda.get_device_name(self.device)}")
+        else:
+            print(f"integrator device {self.device}")
         self._init_torch_backend()
         try:
             self._step_compiled = torch.compile(
@@ -141,6 +136,15 @@ class TorchBackend:
             self._step_compiled = self._step_impl
             print(f"torch.compile skipped ({exc})")
 
+    # I use mps
+    def _get_torch_device(self):
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        elif torch.cuda.is_available():
+            return torch.device("cuda")
+        else:
+            return torch.device("cpu")
+        
     def _fft_dims(self):
         """Get the dimensions for the FFT"""
         return tuple(range(-self.d, 0))
