@@ -1,9 +1,10 @@
 """Qi and Yartsev single-cell lattice fit"""
 import os
+import time
 import numpy as np
 import torch
 
-from model.network.torch_backend import pick_torch_device
+from model.metrics import wrapped_angle_diff
 from model.path_integration import frame
 
 FLOOR = 0.01
@@ -113,6 +114,15 @@ def _lattice_g(xy, spacing, orientations, n_phase=N_PHASE, floor=FLOOR):
         dist2 = (world * world).sum(dim=-1)
         total = total + torch.exp(-dist2 / (2.0 * sigma2)) #adds a Gaussian of peak 1 and width
     return total + float(floor)
+
+
+def _scoring_device():
+    """GPU when the machine has one."""
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
 
 
 def _to_dense(matrix, device):
@@ -375,7 +385,7 @@ def _score_spacings(xy, spacings, orientations, n_phase, drawn, n_shuffles, coun
     scoring device. Orientations are scored a few at a time. The spacings
     passed in share one multiply.
     """
-    device = pick_torch_device()
+    device = _scoring_device()
     n_cells = int(drawn["n_spikes"].shape[0])
     n_shuffles = int(n_shuffles)
     spacings = np.atleast_1d(np.asarray(spacings, dtype=float))
@@ -547,6 +557,8 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
     Fits one spacing per cell. It picks one spacing for the cell
     and lets orientation and phase be chosen separately on every route.
     """
+    # Time the prepare
+    t0 = time.perf_counter()
     #setup everything
     positions = np.asarray(positions, dtype=float)
     activity = np.asarray(activity, dtype=float)
@@ -578,7 +590,11 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
     real_phase = np.full((n_spacings, n_routes, n_cells), -1, dtype=int)
     fired = np.stack([item["n_spikes"] for item in drawn], axis=0) > 0
 
-    device = pick_torch_device()
+    device = _scoring_device()
+    if device.type == "cuda":
+        print(f"qy device {device}  {torch.cuda.get_device_name(device)}")
+    else:
+        print(f"qy device {device}")
     workers = _default_jobs() if n_jobs is None else int(n_jobs)
     # One GPU: spacings stay in this process and reuse the uploaded counts.
     if device.type != "cpu":
@@ -587,6 +603,9 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
     if workers > 1:
         from joblib import Parallel, delayed
         parallel = Parallel(n_jobs=workers)
+    # Time the prepare
+    t1 = time.perf_counter()
+    print(f"qy prepare {t1 - t0:.2f}s")
 
     #Search each route for the best spacing, orientation, and phase.
     for r_i, route in enumerate(routes):
@@ -629,6 +648,9 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
             shuf_totals[:, s_i] += best_shuf
             weight = fired[r_i].astype(float)
             loo_weighted[:, s_i] += _loo_z(best_shuf) * weight
+    # Time the search
+    t2 = time.perf_counter()
+    print(f"qy search {t2 - t1:.2f}s")
 
     for route, item in zip(routes, drawn):
         route["n_spikes"] = item["n_spikes"]
@@ -639,6 +661,9 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
         real_orient, real_phase,
         fired, spikes, return_spikes,  # CHANGED: was drawn[0]["spikes"]
     )
+    # Time the assemble
+    t3 = time.perf_counter()
+    print(f"qy assemble {t3 - t2:.2f}s")
     return out
 
 
@@ -650,3 +675,36 @@ def qy_fit(traj, field_pos, field_act, stride, **kwargs):
         field_pos, field_act, flight_of, traj.flight_table, traj.route_table,
         **kwargs,
     )
+
+
+def repeat_phase_misalignment(theta, flight_table):
+    """Phase difference between repeats of one stored path, in radians.
+
+    Measures how far the network's internal phase drifts when the same
+    path is flown again.
+    """
+    theta = np.asarray(theta, dtype=float) #internal phase of the network
+    grouped = {}
+    #loop thorugh flight table when they start and end
+    for row in flight_table:
+        grouped.setdefault(int(row["route"]), []).append(row)
+
+    rows = []
+    #walks thorugh stored paths. Compare first pass with later passes.
+    for route_id, flights in grouped.items():
+        flights = sorted(flights, key=lambda item: int(item["t0"]))
+        ref = theta[int(flights[0]["t0"]):int(flights[0]["t1"])]
+        diffs = []
+
+        #Later passes of the pass , skip the first one.
+        for row in flights[1:]:
+            cur = theta[int(row["t0"]):int(row["t1"])]
+            n = min(len(ref), len(cur))
+            diffs.append(wrapped_angle_diff(cur[:n], ref[:n]))
+        if diffs:
+            stacked = np.concatenate(diffs, axis=0)
+            rms = float(np.sqrt(np.mean(np.square(stacked)))) #root-mean-square of the phase differences
+        else:
+            rms = 0.0
+        rows.append(dict(route=int(route_id), n_repeats=len(flights), rms_rad=rms))
+    return rows
