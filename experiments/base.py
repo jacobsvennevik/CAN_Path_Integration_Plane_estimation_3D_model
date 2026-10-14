@@ -166,7 +166,10 @@ class ExperimentResult:
     shuf_sums:         np.ndarray = None   # (n_shuffle, bins, ..., n_sub) shuffle maps
     active_mask:       np.ndarray = None   # (n_sub,) bool — neurons with non-trivial activity
     kappa_hist:        np.ndarray = None  # vMF κ
-    warmup_volume:     np.ndarray = None
+    snapshots:         np.ndarray = None  # sheet frames during the walk
+    snapshot_times:    np.ndarray = None
+    snapshot_cells:    np.ndarray = None  # tracked cell at each frame
+    tracker_radius:    int = None
     n_gravity_flips:   int = 0
     field_pos:         np.ndarray = None   # (n_samples, 3) metres, volumetric IFD
     field_act:         np.ndarray = None   # (n_samples, n_sub) activity trace
@@ -233,7 +236,8 @@ class BaseExperiment:
         )
 
     def run(self, world_pos, v_body_seq, torus_gt, g_vec,
-            n_true_seq=None, segment_starts=None, plane=None) -> ExperimentResult:
+            n_true_seq=None, segment_starts=None, plane=None,
+            snapshot_stride: int = 50_000) -> ExperimentResult:
         plane = self.config.plane if plane is None else plane
         bins = self.config.experiment.ratemap_bins
         env_size = self.config.experiment.env_size
@@ -246,7 +250,6 @@ class BaseExperiment:
         integrator.reset(torus_gt[0])
         settle = self._settle_steps()
         integrator.warmup(n_steps=settle)
-        warmup_volume = integrator.backend.current_volume()
 
         refresh_mask = integrator.default_refresh_mask(
             T, timing=plane.refresh_timing, segment_starts=segment_starts,
@@ -297,6 +300,7 @@ class BaseExperiment:
             world_pos=world_pos if ndim == 3 else None,
             field_stride=field_stride,
             max_trace_bytes=max_trace_bytes,
+            snapshot_stride=snapshot_stride,
         )
 
         kappa = np.asarray(integrator.history["kappa"], dtype=float)
@@ -337,7 +341,13 @@ class BaseExperiment:
             shuf_sums=integrator.ratemap_shuf_sums,
             active_mask=active_mask,
             kappa_hist=kappa,
-            warmup_volume=warmup_volume,
+            snapshots=getattr(integrator.backend, "snapshots", None),
+            snapshot_times=getattr(integrator.backend, "snapshot_times", None),
+            snapshot_cells=getattr(integrator.backend, "snapshot_cells", None),
+            tracker_radius=(
+                None if integrator.backend.tracker is None
+                else int(integrator.backend.tracker.radius)
+            ),
             n_gravity_flips=int(getattr(integrator, "n_gravity_flips", 0)),
             field_pos=getattr(integrator, "field_pos", None),
             field_act=getattr(integrator, "field_act", None),
