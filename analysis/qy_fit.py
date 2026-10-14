@@ -3,7 +3,6 @@ import os
 import time
 import numpy as np
 import torch
-from scipy import sparse
 
 from model.metrics import wrapped_angle_diff
 from model.path_integration import frame
@@ -126,17 +125,12 @@ def _scoring_device():
     return torch.device("cpu")
 
 
-def _to_sparse(matrix, device):
-    """SciPy count table as a torch sparse matrix on ``device``."""
-    torch.sparse.check_sparse_tensor_invariants.disable()
-    coo = matrix.tocoo()
-    indices = np.vstack((coo.row, coo.col)).astype(np.int64, copy=False)
-    values = np.asarray(coo.data, dtype=np.float32)
-    return torch.sparse_coo_tensor(
-        torch.from_numpy(np.ascontiguousarray(indices)),
-        torch.from_numpy(np.ascontiguousarray(values)),
-        size=(int(matrix.shape[0]), int(matrix.shape[1])),
-    ).coalesce().to(device)
+def _to_dense(matrix, device):
+    """Count table as a dense torch matrix on ``device``."""
+    dense = np.ascontiguousarray(matrix, dtype=np.float32)
+    device = _scoring_device()
+    print(f"device {device}")
+    return torch.from_numpy(dense).to(device)
 
 
 def log_likelihood_from_parts(n_spikes, occupancy, spike_term):
@@ -274,8 +268,10 @@ def _count_matrix(idx, valid, n_samples):
     rows = np.repeat(np.arange(n_rows), valid.sum(axis=1))  #row of every spike
     cols = idx[valid]  #sample of every spike
     #two spikes in the same row and sample are added up (count 2)
-    return sparse.csr_matrix((np.ones(len(cols)), (rows, cols)),
-                             shape=(n_rows, int(n_samples)))
+    counts = np.zeros((n_rows, int(n_samples)), dtype=np.float32)
+    if len(cols):
+        np.add.at(counts, (rows, cols), 1.0)
+    return counts
 
 
 
@@ -397,8 +393,8 @@ def _score_spacings(xy, spacings, orientations, n_phase, drawn, n_shuffles, coun
     spacings = np.atleast_1d(np.asarray(spacings, dtype=float))
     n_spacings = len(spacings)
     if counts is None:
-        real = _to_sparse(drawn["real"], device)
-        shuf = _to_sparse(drawn["shuffled"], device)
+        real = _to_dense(drawn["real"], device)
+        shuf = _to_dense(drawn["shuffled"], device)
     else:
         real, shuf = counts
     #routes positions in the plane
@@ -431,7 +427,7 @@ def _score_spacings(xy, spacings, orientations, n_phase, drawn, n_shuffles, coun
             log_g = torch.cat(log_parts, dim=1).contiguous()
             occupancy = torch.stack(occ_parts, dim=0)
             #Find the best phase, then the best orientation in this group.
-            real_term = torch.sparse.mm(real, log_g).reshape(
+            real_term = (real @ log_g).reshape(
                 n_cells, n_spacings, n_orient, n_phase_grid)
             ll = log_likelihood_from_parts(
                 n_spikes[:, None, None, None], occupancy[None], real_term)
@@ -449,7 +445,7 @@ def _score_spacings(xy, spacings, orientations, n_phase, drawn, n_shuffles, coun
             best_orient = torch.where(better, o_local + start, best_orient)
 
             #Calculate LL for each shuffle, best phase and orientation.
-            terms = torch.sparse.mm(shuf, log_g).reshape(
+            terms = (shuf @ log_g).reshape(
                 n_shuffles, n_cells, n_spacings, n_orient, n_phase_grid)
             ll_s = log_likelihood_from_parts(
                 n_spikes[None, :, None, None, None], occupancy[None, None], terms)
@@ -614,8 +610,8 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
         counts = None
         if device.type != "cpu":
             counts = (
-                _to_sparse(drawn[r_i]["real"], device),
-                _to_sparse(drawn[r_i]["shuffled"], device),
+                _to_dense(drawn[r_i]["real"], device),
+                _to_dense(drawn[r_i]["shuffled"], device),
             )
         if parallel is None:
             #Score each spacing in chunks
