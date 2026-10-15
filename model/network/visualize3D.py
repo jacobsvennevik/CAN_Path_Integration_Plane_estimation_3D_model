@@ -134,8 +134,8 @@ def visualize_trajectory_projections(traj, decoded=None, title="Torus trajectory
     return fig, axes
 
 
-def plot_pi_error(gt, decoded, title="Path-integration error"):
-    """torus positions in RADIANS"""
+def plot_pi_error(gt, decoded, title="Path-integration error", steps=True):
+    """torus positions in RADIANS. ``steps=False`` keeps only the accumulated error."""
     gt, decoded = np.asarray(gt), np.asarray(decoded)
     if max(np.max(np.abs(gt)), np.max(np.abs(decoded))) < 1.5:
         print("WARNING: input looks like metres, not radians.")
@@ -144,40 +144,54 @@ def plot_pi_error(gt, decoded, title="Path-integration error"):
     # A wrapped difference folds a growing miss back into one period.
     accumulated = unwrap_torus(decoded) - unwrap_torus(gt)
     err = np.linalg.norm(accumulated, axis=1)
-    true_step = wrapped_angle_diff(gt[1:],      gt[:-1]).ravel()
-    dec_step  = wrapped_angle_diff(decoded[1:], decoded[:-1]).ravel()
-    integration_gain = float((true_step @ dec_step) / (true_step @ true_step + 1e-12))  # LS slope thru origin
-
-    fig, ax = plt.subplots(1, 2, figsize=(12, 4))
-    ax[0].plot(err, color="#d6604d", lw=0.4, alpha=0.45)
-    win = max(1, len(err) // 200)
-    if win > 1:
-        smooth = np.convolve(err, np.ones(win) / win, mode="valid")
-        ax[0].plot(np.arange(win - 1, len(err)), smooth, color="#2166ac", lw=1.4,
-                   label=f"mean over {win} steps")
-        ax[0].legend(fontsize=8)
-    ax[0].set(title="accumulated error", xlabel="timestep", ylabel="error (rad)")
-
-    ax[1].scatter(true_step, dec_step, s=2, alpha=0.12, color="#2166ac")
-    lim = np.abs(true_step).max() * 1.1
-    xs = np.linspace(-lim, lim, 50)
-    ax[1].plot(xs, xs, "k--", lw=1, label="y = x (faithful)")
-    ax[1].plot(xs, integration_gain*xs, "r-", lw=1, label=f"fit slope = {integration_gain:.3f}")
-    # binned mean reveals the SHAPE through decoder jitter (this is the tanh test)
-    nb = 15; edges = np.linspace(-lim, lim, nb+1); ctr = 0.5*(edges[:-1]+edges[1:])
-    idx = np.clip(np.digitize(true_step, edges)-1, 0, nb-1)
-    binned = np.array([dec_step[idx==k].mean() if (idx==k).any() else np.nan for k in range(nb)])
-    ax[1].plot(ctr, binned, "o-", color="#b2182b", ms=3, lw=1, label="binned mean")
-    ax[1].set(title="decoded vs true phase-step",
-              xlabel="true delta phase (rad/step)", ylabel="decoded delta phase (rad/step)"); ax[1].legend()
-
     gt_speed = np.linalg.norm(wrapped_angle_diff(gt[1:], gt[:-1]), axis=1)
     path_length = np.concatenate([[0.0], np.cumsum(gt_speed)])
     score = float(err.mean() / (path_length.mean() + 1e-12))
     med = float(np.median(err))
-    fig.suptitle(f"{title} — median accumulated error {med:.3f} rad | "
-                 f"tracking score {score:.4f} | integration gain {integration_gain:.3f}", y=1.02)
-    plt.tight_layout(); return fig, ax
+
+    if steps:
+        true_step = wrapped_angle_diff(gt[1:], gt[:-1]).ravel()
+        dec_step = wrapped_angle_diff(decoded[1:], decoded[:-1]).ravel()
+        integration_gain = float((true_step @ dec_step) / (true_step @ true_step + 1e-12))
+        fig, ax = plt.subplots(1, 2, figsize=(12, 4))
+        err_ax = ax[0]
+    else:
+        integration_gain = None
+        fig, err_ax = plt.subplots(figsize=(6, 3.5))
+        ax = err_ax
+
+    err_ax.plot(err, color="#d6604d", lw=0.4, alpha=0.45)
+    win = max(1, len(err) // 200)
+    if win > 1:
+        smooth = np.convolve(err, np.ones(win) / win, mode="valid")
+        err_ax.plot(np.arange(win - 1, len(err)), smooth, color="#2166ac", lw=1.4,
+                    label=f"mean over {win} steps")
+        err_ax.legend(fontsize=8)
+    err_ax.set(title="accumulated error", xlabel="timestep", ylabel="error (rad)")
+
+    if steps:
+        ax[1].scatter(true_step, dec_step, s=2, alpha=0.12, color="#2166ac")
+        lim = np.abs(true_step).max() * 1.1
+        xs = np.linspace(-lim, lim, 50)
+        ax[1].plot(xs, xs, "k--", lw=1, label="y = x (faithful)")
+        ax[1].plot(xs, integration_gain * xs, "r-", lw=1, label=f"fit slope = {integration_gain:.3f}")
+        # binned mean reveals the SHAPE through decoder jitter (this is the tanh test)
+        nb = 15
+        edges = np.linspace(-lim, lim, nb + 1)
+        ctr = 0.5 * (edges[:-1] + edges[1:])
+        idx = np.clip(np.digitize(true_step, edges) - 1, 0, nb - 1)
+        binned = np.array([dec_step[idx == k].mean() if (idx == k).any() else np.nan for k in range(nb)])
+        ax[1].plot(ctr, binned, "o-", color="#b2182b", ms=3, lw=1, label="binned mean")
+        ax[1].set(title="decoded vs true phase-step",
+                  xlabel="true delta phase (rad/step)", ylabel="decoded delta phase (rad/step)")
+        ax[1].legend()
+        fig.suptitle(f"{title} — median accumulated error {med:.3f} rad | "
+                     f"tracking score {score:.4f} | integration gain {integration_gain:.3f}", y=1.02)
+    else:
+        fig.suptitle(f"{title} — median accumulated error {med:.3f} rad | "
+                     f"tracking score {score:.4f}")
+    plt.tight_layout()
+    return fig, ax
 
 
 
