@@ -2,7 +2,9 @@ from dataclasses import dataclass
 
 import numpy as np
 from config import ExperimentConfig
-from experiments.base import BaseExperiment, Trajectory, world_to_torus_gt
+from experiments.base import (
+    BaseExperiment, Trajectory, movement_plane_normals, torus_gt_from_velocity,
+)
 
 
 @dataclass
@@ -14,7 +16,6 @@ class Arena3DConfig(ExperimentConfig):
 class Arena3DExperiment(BaseExperiment):
     condition_label = "arena_3d"
     ratemap_ndim = 3
- 
 
     def generate_trajectory(self, turn_std: float = None, n_steps=None, seed=None):
         """Independent 3D reflecting walk. n_steps and seed default to config.
@@ -49,13 +50,12 @@ class Arena3DExperiment(BaseExperiment):
             v_body_seq[t] = v
 
         d = self.qan.manifold.dim
-        n_true = np.broadcast_to(np.array([0.0, 0.0, 1.0]), (w.n_steps, 3))
+        # Plane of this step and the next, normal against gravity. Not the horizontal floor.
+        n_true = movement_plane_normals(v_body_seq)
         return Trajectory(
             world_pos=world_pos,
             v_body_seq=v_body_seq,
-            torus_gt=world_to_torus_gt(
-                world_pos[:, :d],#keep as many axis as the the manifold has
-                w.scale),
+            torus_gt=torus_gt_from_velocity(v_body_seq, n_true, w.scale, d),
             n_true_seq=n_true,
             wall_hits=wall_hits,
         )

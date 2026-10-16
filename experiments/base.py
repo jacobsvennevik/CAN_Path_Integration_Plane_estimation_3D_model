@@ -65,6 +65,55 @@ def torus_gt_from_velocity(v_body_seq, n_true_seq, scale, d):
     return (np.pi + scale * np.cumsum(drive, axis=0)) % (2 * np.pi)
 
 
+def movement_plane_normals(v_body_seq, g=(0.0, 0.0, -1.0)):
+    """Get the unit normal of the plane spanned by this step and the next.
+
+    """
+    # the step sequence as a float
+    v = np.asarray(v_body_seq, dtype=float)
+    n_steps = len(v)
+    # gravity as an unit vector
+    g_hat = np.asarray(g, dtype=float)
+    g_hat = g_hat / np.linalg.norm(g_hat)
+    up = -g_hat
+    
+    #start every sample straights up
+    normals = np.repeat(up[None, :], n_steps, axis=0)
+    if n_steps < 2:
+        return normals
+    
+    #cross product is peprencular to this step v[-1] and the next step v[1:]
+    cross = np.cross(v[:-1], v[1:])
+    cross_norm = np.linalg.norm(cross, axis=1)
+    speed = np.linalg.norm(v, axis=1)
+    denom = speed[:-1] * speed[1:]
+    usable = ((denom > 1e-15) #usable if the speed is not too small
+              & (cross_norm > 1e-6 * denom)) #usable if the cross product is not too small
+
+    #Last plane check
+    current = None
+    #Loop through steps
+    for t in range(n_steps - 1):
+        #If the step is usable, set the normal to the cross product of the step and the next step
+        if usable[t]:
+            normal = cross[t] / cross_norm[t]
+            if float(np.dot(normal, g_hat)) > 0.0:
+                normal = -normal
+            current = normal
+            normals[t] = current
+        #IF not keep the previous normal
+        elif current is not None:
+            normals[t] = current
+    if current is not None:
+        normals[-1] = current
+
+    if np.any(usable):
+        first = int(np.flatnonzero(usable)[0])
+        if first > 0:
+            normals[:first] = normals[first]
+    return normals
+
+
 def bounce_square(uv, heading, speed, limit):
     """One in-plane step at `heading`, reflected so it stays in the ±limit square.
 

@@ -4,7 +4,8 @@ import numpy as np
 
 from config import ExperimentConfig
 from experiments.base import (
-    BaseExperiment, Trajectory, torus_gt_from_velocity, walk_params,
+    BaseExperiment, Trajectory, movement_plane_normals, torus_gt_from_velocity,
+    walk_params,
 )
 from model.path_integration import frame
 
@@ -189,15 +190,14 @@ def build_schedule(n_routes, round_trips, rng):
 
 def _blank():
     #Create the container for the blocks
-    return {key: [] for key in ("pos", "vel", "n", "seg", "route", "flight", "plane")}
+    return {key: [] for key in ("pos", "vel", "seg", "route", "flight", "plane")}
 
 
-def _push(blocks, pos, vel, normal, segment, route_label, flight_label, plane):
+def _push(blocks, pos, vel, segment, route_label, flight_label, plane):
     #add one chunck
     n_rows = len(pos)
     blocks["pos"].append(np.asarray(pos, dtype=float))
     blocks["vel"].append(np.asarray(vel, dtype=float))
-    blocks["n"].append(np.repeat(np.asarray(normal, dtype=float)[None, :], n_rows, axis=0))
     blocks["seg"].append(np.full(n_rows, int(segment), dtype=int))
     blocks["route"].append(np.full(n_rows, int(route_label), dtype=int))
     blocks["flight"].append(np.full(n_rows, int(flight_label), dtype=int))
@@ -244,7 +244,6 @@ def make_planar_routes_trajectory(cfg, dt, scale, dim, rng=None, turn_std=None):
         out_label = 2 * base
         back_label = 2 * base + 1
         sheet = 2 * base
-        normal = route["n_true"]
 
         #records the sample time index where this round trip begins
         starts.append(t)
@@ -254,7 +253,7 @@ def make_planar_routes_trajectory(cfg, dt, scale, dim, rng=None, turn_std=None):
             blocks,
             route["positions"],
             route["velocities"],
-            normal, trip, out_label, flight, sheet,
+            trip, out_label, flight, sheet,
         )
         t += len(route["positions"])
         flight_table.append(dict(
@@ -267,7 +266,7 @@ def make_planar_routes_trajectory(cfg, dt, scale, dim, rng=None, turn_std=None):
         back_pos, back_vel = return_path(route)
         t0 = int(t)
         _push(
-            blocks, back_pos, back_vel, normal,
+            blocks, back_pos, back_vel,
             trip, back_label, flight, sheet,
         )
         t += len(back_pos)
@@ -280,7 +279,7 @@ def make_planar_routes_trajectory(cfg, dt, scale, dim, rng=None, turn_std=None):
     #Concatenate the blocks into the trajectory
     world = np.concatenate(blocks["pos"], axis=0)
     vel = np.concatenate(blocks["vel"], axis=0)
-    n_true = np.concatenate(blocks["n"], axis=0)
+    n_true = movement_plane_normals(vel)
     flight_of = np.concatenate(blocks["flight"], axis=0)
     plane_ids = np.concatenate(blocks["plane"], axis=0)
     torus_gt = torus_gt_from_velocity(vel, n_true, scale, dim)
