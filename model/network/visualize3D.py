@@ -6,6 +6,7 @@ We break the 3D space into 2D volumes. Look in notebooks for simulations
 This module provides functions to visualize:
 1. CAN activity states
 2. QAN trajectories, bump tracking, and path-integration error
+3. Held-normal error of the plane estimator
 """
 from made.visuals import clean_axes
 from model.metrics import wrapped_angle_diff, unwrap_torus
@@ -203,7 +204,7 @@ def plot_pi_error(gt, decoded, title="Path-integration error", steps=True):
             step_ax.plot(
                 ctr, typical, "o-", color="#b2182b", ms=5, lw=1.2,
                 label="typical decoded step")
-        gain_txt = f"{integration_gain:.2f}" if np.isfinite(integration_gain) else "—"
+        gain_txt = f"{integration_gain:.4f}" if np.isfinite(integration_gain) else "—"
         step_ax.set(
             title=f"typical step is {gain_txt}× the true step",
             xlabel="true step (rad)", ylabel="decoded step (rad)",
@@ -382,3 +383,40 @@ def plot_bump_snapshots(volumes, times, cells=None, radius=None, cmap="inferno",
     fig.suptitle(f"{label}, possibly with tracker window", y=1.02)
     plt.tight_layout()
     return fig, axes
+
+
+def plot_plane_rms(kappa_sens, tau_refresh, rms_err_deg, title="Held-normal error"):
+    """RMS angular error against sensor concentration, one line per hold time."""
+    kappa_sens = np.asarray(kappa_sens, dtype=float)
+    tau_refresh = np.asarray(tau_refresh)
+    rms_err_deg = np.asarray(rms_err_deg, dtype=float)
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    for tau in dict.fromkeys(tau_refresh.tolist()):
+        take = tau_refresh == tau
+        order = np.argsort(kappa_sens[take])
+        ax.plot(
+            kappa_sens[take][order], rms_err_deg[take][order],
+            marker="o", label=f"τ={int(tau)}",
+        )
+    ax.set_xscale("log")
+    ax.set(title=title, xlabel="κ_sens", ylabel="RMS error (deg)")
+    ax.legend()
+    fig.tight_layout()
+    return fig, ax
+
+
+def plot_plane_error_trace(traces, segment_starts=None, title="Held-normal error"):
+    """Error over time. ``traces`` is (label, err_deg) pairs.
+
+    ``segment_starts`` draws a line at each later route change.
+    """
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    if segment_starts is not None:
+        for t0 in np.asarray(segment_starts).ravel()[1:]:
+            ax.axvline(int(t0), color="0.85", lw=0.4, zorder=0)
+    for label, err in traces:
+        ax.plot(np.asarray(err), lw=0.6, label=label)
+    ax.set(title=title, xlabel="step", ylabel="error (deg)")
+    ax.legend()
+    fig.tight_layout()
+    return fig, ax
