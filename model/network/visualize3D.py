@@ -135,13 +135,16 @@ def visualize_trajectory_projections(traj, decoded=None, title="Torus trajectory
 
 
 def plot_pi_error(gt, decoded, title="Path-integration error", steps=True):
-    """torus positions in RADIANS. ``steps=False`` keeps only the accumulated error."""
+    """Torus positions in radians.
+
+    The left panel is the accumulated error. With ``steps=True``, the right
+    panel is the typical decoded step against the true step. ``steps=False``
+    drops that panel.
+    """
     gt, decoded = np.asarray(gt), np.asarray(decoded)
     if max(np.max(np.abs(gt)), np.max(np.abs(decoded))) < 1.5:
         print("WARNING: input looks like metres, not radians.")
 
-    # Same quantity as tracking_score: unwrap both paths, then subtract.
-    # A wrapped difference folds a growing miss back into one period.
     accumulated = unwrap_torus(decoded) - unwrap_torus(gt)
     err = np.linalg.norm(accumulated, axis=1)
     gt_speed = np.linalg.norm(wrapped_angle_diff(gt[1:], gt[:-1]), axis=1)
@@ -152,8 +155,28 @@ def plot_pi_error(gt, decoded, title="Path-integration error", steps=True):
     if steps:
         true_step = wrapped_angle_diff(gt[1:], gt[:-1]).ravel()
         dec_step = wrapped_angle_diff(decoded[1:], decoded[:-1]).ravel()
-        integration_gain = float((true_step @ dec_step) / (true_step @ true_step + 1e-12))
-        fig, ax = plt.subplots(1, 2, figsize=(12, 4))
+        # Median inside each bin. 
+        lim = float(np.abs(true_step).max()) * 1.1
+        nb = 11
+        edges = np.linspace(-lim, lim, nb + 1)
+        idx = np.clip(np.digitize(true_step, edges) - 1, 0, nb - 1)
+        min_count = max(5, int(0.005 * true_step.size))
+        ctr, typical = [], []
+        for k in range(nb):
+            take = idx == k
+            if int(take.sum()) < min_count:
+                continue
+            # Median true step
+            ctr.append(float(np.median(true_step[take])))
+            typical.append(float(np.median(dec_step[take])))
+        ctr = np.asarray(ctr, dtype=float)
+        typical = np.asarray(typical, dtype=float)
+        if ctr.size and float(ctr @ ctr) > 1e-18:
+            integration_gain = float(ctr @ typical / (ctr @ ctr))
+        else:
+            integration_gain = float("nan")
+        fig, ax = plt.subplots(
+            1, 2, figsize=(10, 4.2), gridspec_kw={"width_ratios": [1.35, 1]})
         err_ax = ax[0]
     else:
         integration_gain = None
@@ -170,23 +193,27 @@ def plot_pi_error(gt, decoded, title="Path-integration error", steps=True):
     err_ax.set(title="accumulated error", xlabel="timestep", ylabel="error (rad)")
 
     if steps:
-        ax[1].scatter(true_step, dec_step, s=2, alpha=0.12, color="#2166ac")
-        lim = np.abs(true_step).max() * 1.1
-        xs = np.linspace(-lim, lim, 50)
-        ax[1].plot(xs, xs, "k--", lw=1, label="y = x (faithful)")
-        ax[1].plot(xs, integration_gain * xs, "r-", lw=1, label=f"fit slope = {integration_gain:.3f}")
-        # binned mean reveals the SHAPE through decoder jitter (this is the tanh test)
-        nb = 15
-        edges = np.linspace(-lim, lim, nb + 1)
-        ctr = 0.5 * (edges[:-1] + edges[1:])
-        idx = np.clip(np.digitize(true_step, edges) - 1, 0, nb - 1)
-        binned = np.array([dec_step[idx == k].mean() if (idx == k).any() else np.nan for k in range(nb)])
-        ax[1].plot(ctr, binned, "o-", color="#b2182b", ms=3, lw=1, label="binned mean")
-        ax[1].set(title="decoded vs true phase-step",
-                  xlabel="true delta phase (rad/step)", ylabel="decoded delta phase (rad/step)")
-        ax[1].legend()
-        fig.suptitle(f"{title} — median accumulated error {med:.3f} rad | "
-                     f"tracking score {score:.4f} | integration gain {integration_gain:.3f}", y=1.02)
+        span = lim
+        if typical.size:
+            span = max(span, float(np.max(np.abs(typical)))) * 1.05
+        step_ax = ax[1]
+        step_ax.plot(
+            [-span, span], [-span, span], "k--", lw=1, label="equal to the true step")
+        if typical.size:
+            step_ax.plot(
+                ctr, typical, "o-", color="#b2182b", ms=5, lw=1.2,
+                label="typical decoded step")
+        gain_txt = f"{integration_gain:.2f}" if np.isfinite(integration_gain) else "—"
+        step_ax.set(
+            title=f"typical step is {gain_txt}× the true step",
+            xlabel="true step (rad)", ylabel="decoded step (rad)",
+            xlim=(-span, span), ylim=(-span, span))
+        step_ax.set_box_aspect(1)
+        step_ax.legend(fontsize=8, loc="lower right")
+        fig.suptitle(
+            f"{title} — median error {med:.3f} rad | tracking score {score:.4f} | "
+            f"typical gain {gain_txt}",
+            y=1.02)
     else:
         fig.suptitle(f"{title} — median accumulated error {med:.3f} rad | "
                      f"tracking score {score:.4f}")

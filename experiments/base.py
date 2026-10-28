@@ -87,8 +87,8 @@ def movement_plane_normals(v_body_seq, g=(0.0, 0.0, -1.0)):
     cross_norm = np.linalg.norm(cross, axis=1)
     speed = np.linalg.norm(v, axis=1)
     denom = speed[:-1] * speed[1:]
-    usable = ((denom > 1e-15) #usable if the speed is not too small
-              & (cross_norm > 1e-6 * denom)) #usable if the cross product is not too small
+    usable = ((denom > 1e-15) #usable if the speed is not too small 
+              & (cross_norm > 1e-6 * denom)) #usable if the plane actually changes
 
     #Last plane check
     current = None
