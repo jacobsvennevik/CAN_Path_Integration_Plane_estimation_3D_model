@@ -19,15 +19,13 @@ def frame(n_hat: np.ndarray) -> np.ndarray:
     return build_rotation_matrix(n_hat)[:2, :].T
 
 
-def pi_star(v_alloc: np.ndarray, dim: int = None) -> np.ndarray:
-    """Slice of an allocentric velocity.
+def pi_star(v_alloc: np.ndarray) -> np.ndarray:
+    """Drop the component along the held normal.
 
-    After R maps n̂ to ẑ the torus axes are the leading coordinates, so this
-    returns the first `dim` components. The whole vector when dim is None.
+    After R maps n̂ onto ẑ, the component along ẑ is dropped.
     """
-    v = np.asarray(v_alloc, dtype=float)
-    return v if dim is None else v[:int(dim)]
-
+    v = np.asarray(v_alloc, dtype=float).reshape(-1)
+    return np.eye(2, 3) @ v
 
 KAPPA_W_DEFAULT = 1e4
 
@@ -191,7 +189,7 @@ class PathIntegrator:
         target_speed_rad = v_alloc * self.scale  # rad/step
         # backend.step expects rad per unit time
         # and one component per torus axis (π star after R maps n̂ -> ẑ)
-        drive = pi_star(target_speed_rad, self.qan.manifold.dim) / self.qan.dt
+        drive = pi_star(target_speed_rad) / self.qan.dt
         self.backend.step(drive)
         return n_hat, v_alloc, target_speed_rad
 

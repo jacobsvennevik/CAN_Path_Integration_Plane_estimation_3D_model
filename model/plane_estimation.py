@@ -12,16 +12,20 @@ Z_HAT = np.array([0.0, 0.0, 1.0])
 
 
 def build_rotation_matrix(n_hat: np.ndarray) -> np.ndarray:
-    """
-    Returns R such that R @ n_hat = z_hat, via the closed-form
-    vector-to-vector rotation (Rodrigues).
+    """Rotation taking the estimated normal onto +z.
+
+    Wang et al. (2021), Eq. 10, is the rotation about the unit axis (x, y, z)
+    that carries +z onto the normal. The integrator uses the transpose, so
+    R @ n_hat = z_hat.
     """
     n_hat = np.asarray(n_hat, dtype=float)
     n_hat = n_hat / np.linalg.norm(n_hat)
     z_hat = Z_HAT
 
-    v = np.cross(n_hat, z_hat)   # rotation axis * sin(theta)
-    c = float(np.dot(n_hat, z_hat))  # cos(theta)
+    # Axis from +z toward the normal. Its length is sin(theta).
+    axis = np.cross(z_hat, n_hat)
+    s = float(np.linalg.norm(axis))
+    c = float(np.dot(z_hat, n_hat))
 
     # already aligned -> identity (this is the common case on a flat floor)
     if c > 1.0 - 1e-10:
@@ -30,12 +34,13 @@ def build_rotation_matrix(n_hat: np.ndarray) -> np.ndarray:
     if c < -1.0 + 1e-10:
         return np.diag([1.0, -1.0, -1.0])
 
-    vx = np.array([
-        [0.0,  -v[2],  v[1]],
-        [v[2],  0.0,  -v[0]],
-        [-v[1], v[0],  0.0 ],
+    x, y, z = axis / s
+    T = np.array([                             # Wang et al. (2021), Eq. 10
+        [(1 - c) * x * x + c,     (1 - c) * x * y - s * z, (1 - c) * x * z + s * y],
+        [(1 - c) * y * x + s * z, (1 - c) * y * y + c,     (1 - c) * y * z - s * x],
+        [(1 - c) * z * x - s * y, (1 - c) * z * y + s * x, (1 - c) * z * z + c],
     ])
-    return np.eye(3) + vx + vx @ vx * (1.0 / (1.0 + c)) 
+    return T.T 
 
 
 def A_d(kappa, d=D):

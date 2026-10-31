@@ -27,7 +27,7 @@ def torus_error(decoded, truth):
     )
 
 
-def tracking_score(decoded, truth):
+def tracking_score(decoded, truth, step_weight=5.0):
     """Path-integration score: mean unwrap error / mean unwrap path length.
 
     Dimensionless. 0 is perfect; 1 means the error is as large as the walk.
@@ -41,4 +41,10 @@ def tracking_score(decoded, truth):
     path_length = np.concatenate(
         [[0.0], np.cumsum(np.linalg.norm(gt_step, axis=1))]
     )
-    return float(error.mean() / (path_length.mean() + 1e-12))
+    dec_step = np.diff(dec_path, axis=0)
+    step_mismatch = (np.linalg.norm(dec_step - gt_step, axis=1).mean()
+                     / (np.linalg.norm(gt_step, axis=1).mean() + 1e-12))
+    return float(error.mean() / (path_length.mean() + 1e-12)
+                 * (1.0 + step_weight * step_mismatch))
+
+
