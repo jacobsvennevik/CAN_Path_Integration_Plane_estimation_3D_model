@@ -9,7 +9,7 @@ This module provides functions to visualize:
 3. Held-normal error of the plane estimator
 """
 from made.visuals import clean_axes
-from model.metrics import wrapped_angle_diff, unwrap_torus
+from model.metrics import wrapped_angle_diff, unwrap_torus, tracking_score
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -148,15 +148,13 @@ def plot_pi_error(gt, decoded, title="Path-integration error", steps=True):
 
     accumulated = unwrap_torus(decoded) - unwrap_torus(gt)
     err = np.linalg.norm(accumulated, axis=1)
-    gt_speed = np.linalg.norm(wrapped_angle_diff(gt[1:], gt[:-1]), axis=1)
-    path_length = np.concatenate([[0.0], np.cumsum(gt_speed)])
-    score = float(err.mean() / (path_length.mean() + 1e-12))
+    score = tracking_score(decoded, gt)
     med = float(np.median(err))
 
     if steps:
         true_step = wrapped_angle_diff(gt[1:], gt[:-1]).ravel()
         dec_step = wrapped_angle_diff(decoded[1:], decoded[:-1]).ravel()
-        # Median inside each bin. 
+        # Mean inside each bin.
         lim = float(np.abs(true_step).max()) * 1.1
         nb = 11
         edges = np.linspace(-lim, lim, nb + 1)
@@ -167,9 +165,8 @@ def plot_pi_error(gt, decoded, title="Path-integration error", steps=True):
             take = idx == k
             if int(take.sum()) < min_count:
                 continue
-            # Median true step
-            ctr.append(float(np.median(true_step[take])))
-            typical.append(float(np.median(dec_step[take])))
+            ctr.append(float(np.mean(true_step[take])))
+            typical.append(float(np.mean(dec_step[take])))
         ctr = np.asarray(ctr, dtype=float)
         typical = np.asarray(typical, dtype=float)
         if ctr.size and float(ctr @ ctr) > 1e-18:
