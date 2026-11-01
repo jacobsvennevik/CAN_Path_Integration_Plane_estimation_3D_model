@@ -70,13 +70,14 @@ class PathIntegrator:
     def __init__(self, qan, scale=1.0,
                  decode_chunk=4096, decode_radius=None, decode_seed_radius=None,
                  kappa_w=KAPPA_W_DEFAULT, kappa_sens=300.0,
-                 tau_refresh=1, seed=0,
+                 tau_refresh=1, plane_mode="bayesian", seed=0,
                  refresh_settle_steps=200, reset_prior_at_segment_start=False,
                  device=None):
         self.qan = qan
         self.kappa_w = float(kappa_w)  # process-noise concentration for predict()
         self.kappa_sens = float(kappa_sens)
         self.tau_refresh = int(tau_refresh)
+        self.plane_mode = plane_mode
         self.refresh_settle_steps = int(refresh_settle_steps)
         self.reset_prior_at_segment_start = bool(reset_prior_at_segment_start)
         self.scale = scale
@@ -172,10 +173,13 @@ class PathIntegrator:
         #estimate of the floor and checks that it is not upside down
         if reset_prior: #True at the start of a new segment
             self._vmf_state = uniform_prior() #concentration = 0 for uniform prior
-        #one step of the filter
-        self._update_filter(v_body, n_ref)
-        #copy of direction of the mean of the von mises fisher distribution
-        n_hat = np.asarray(self._vmf_state.mu, dtype=float).copy()
+        if self.plane_mode == "true":
+            n_hat = n_ref.copy()
+        else:
+            #one step of the filter
+            self._update_filter(v_body, n_ref)
+            #copy of direction of the mean of the von mises fisher distribution
+            n_hat = np.asarray(self._vmf_state.mu, dtype=float).copy()
         if np.dot(n_hat, g_hat) > 0:
             n_hat = -n_hat
             self.n_gravity_flips += 1

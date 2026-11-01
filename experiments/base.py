@@ -279,6 +279,7 @@ class BaseExperiment:
             kappa_w=plane.kappa_w,
             kappa_sens=plane.kappa_sens,
             tau_refresh=plane.tau_refresh,
+            plane_mode=plane.plane_mode,
             seed=plane.seed,
             refresh_settle_steps=plane.refresh_settle_steps,
             reset_prior_at_segment_start=plane.reset_prior_at_segment_start,

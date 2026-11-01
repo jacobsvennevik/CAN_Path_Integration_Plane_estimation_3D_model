@@ -46,10 +46,15 @@ class NetworkConfig:
 
 @dataclass
 class PlaneConfig:
-    """Estimator readout: vMF filter and how long the normal is held."""
+    """Estimator readout: vMF filter and how long the normal is held.
+
+    plane_mode "bayesian" drives the sheet from the filter.
+    plane_mode "true" drives it from the true plane normal.
+    """
     kappa_w:         float = 1e4
     kappa_sens:      float = 300.0
     tau_refresh:     int   = 1
+    plane_mode:      str   = "bayesian"  # "bayesian" or "true"
     refresh_timing:  str   = "free"     # harness
     refresh_settle_steps: int = 200
     reset_prior_at_segment_start: bool = False

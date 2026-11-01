@@ -402,6 +402,42 @@ def plot_plane_rms(kappa_sens, tau_refresh, rms_err_deg, title="Held-normal erro
     return fig, ax
 
 
+def plot_plane_rms_grid(kappa_sens, tau_refresh, rms_err_deg,
+                        title="Held-normal RMS error"):
+    """RMS angular error on the (τ, κ_sens) grid. Color is the error in degrees.
+
+    High κ_sens is the top row. Each column is one hold time.
+    """
+    kappa_sens = np.asarray(kappa_sens, dtype=float)
+    tau_refresh = np.asarray(tau_refresh, dtype=float)
+    rms_err_deg = np.asarray(rms_err_deg, dtype=float)
+    kappas = np.unique(kappa_sens)[::-1]
+    taus = np.unique(tau_refresh)
+    grid = np.full((len(kappas), len(taus)), np.nan)
+    k_index = {float(k): i for i, k in enumerate(kappas)}
+    t_index = {float(t): j for j, t in enumerate(taus)}
+    for k, t, err in zip(kappa_sens, tau_refresh, rms_err_deg):
+        grid[k_index[float(k)], t_index[float(t)]] = err
+
+    fig, ax = plt.subplots(figsize=(8.2, 4.6))
+    image = ax.imshow(grid, aspect="auto", cmap="viridis")
+    ax.set_xticks(range(len(taus)))
+    ax.set_xticklabels([f"{int(t)}" for t in taus])
+    ax.set_yticks(range(len(kappas)))
+    ax.set_yticklabels([f"{k:g}" for k in kappas])
+    ax.set(xlabel="τ_refresh", ylabel="κ_sens", title=title)
+    span = float(np.nanmax(grid) - np.nanmin(grid))
+    for i in range(grid.shape[0]):
+        for j in range(grid.shape[1]):
+            val = grid[i, j]
+            light = span == 0 or (val - np.nanmin(grid)) / span < 0.55
+            ax.text(j, i, f"{val:.1f}", ha="center", va="center",
+                    color="white" if light else "black", fontsize=8)
+    fig.colorbar(image, ax=ax, label="RMS error (deg)")
+    fig.tight_layout()
+    return fig, ax
+
+
 def plot_plane_error_trace(traces, segment_starts=None, title="Held-normal error"):
     """Error over time. ``traces`` is (label, err_deg) pairs.
 
