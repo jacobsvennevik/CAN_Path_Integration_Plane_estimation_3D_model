@@ -188,10 +188,15 @@ def score_2d_from_map(
     """
     bins    = sums.shape[0]
     n_total = sums.shape[-1]
-    if shuf_sums is not None and shuf_sums.shape[-1] != n_total:
-        raise ValueError(
-            f"shuffle cell axis {shuf_sums.shape[-1]} != rate-map cell axis {n_total}"
-        )
+    separate_null = False
+    if shuf_sums is not None:
+        n_shuf = int(shuf_sums.shape[-1])
+        if n_shuf > n_total:
+            raise ValueError(
+                f"shuffle cell axis {n_shuf} is longer than the "
+                f"rate-map cell axis {n_total}"
+            )
+        separate_null = n_shuf != n_total
 
     #Find neurons to score
     scored_idx = (np.where(active_mask)[0] if active_mask is not None
@@ -230,15 +235,17 @@ def score_2d_from_map(
     
     # Score already-shifted maps, take the 95th percentile of HGS as the chance.
     if shuf_sums is not None:
-        hgs_shuf = hgs_shift_null(shuf_sums, counts, scored_idx, sigma=sigma)
+        null_idx = None if separate_null else scored_idx
+        hgs_shuf = hgs_shift_null(shuf_sums, counts, null_idx, sigma=sigma)
         finite = np.isfinite(hgs_shuf)  # True where a ring was found
         hgs_shuf_p95 = (
             float(np.nanpercentile(hgs_shuf, 95)) if finite.any()
             else float("nan")
         )  # chance floor
         hgs_shuf_ring_frac = float(finite.mean())  # how often a ring appeared
+        z_idx = np.array([], dtype=int) if separate_null else scored_idx
         sinfo_z, sidx_z = _shift_info_z(
-            shuf_sums, counts, scored_idx, p, sigma, sinfo, sidx)
+            shuf_sums, counts, z_idx, p, sigma, sinfo, sidx)
 
     return dict(
         #NOTE: not everything nessesarry probably

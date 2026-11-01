@@ -71,7 +71,7 @@ class ExperimentConfig:
     ratemap_bins:     int   = 40
     ratemap_n_sub:    int   = 0
     ratemap_n_shuffle: int  = 0
-    ratemap_n_null:   int   = 0
+    ratemap_n_null:   int   = 300  # chance cells when the rate map is the full sheet; 0 shuffles every cell
     ratemap_seed:     int   = 0
     ratemap_active_thresh: float = 1e-3
 
@@ -79,7 +79,7 @@ class ExperimentConfig:
 @dataclass
 class AnalysisConfig:
     """Offline scoring parameters, read by everything under analysis/."""
-    smooth_sigma:    float = 1.75   # gaussian_filter sigma, in BINS (see note below)
+    smooth_sigma:    float = 1   # gaussian_filter sigma, in BINS (see note below)
 
     field_stride:       int = 10
     max_trace_bytes:    int = 1024 ** 3

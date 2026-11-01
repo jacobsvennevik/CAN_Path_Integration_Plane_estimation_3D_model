@@ -308,8 +308,6 @@ class BaseExperiment:
         rng = np.random.default_rng(self.ratemap_seed)
 
         # neuron subsample + shuffle lags (one RNG, sequential draws)
-        # ratemap_n_sub <= 0 keeps every cell. The shuffle buffer uses this
-        # same column order; score_2d_from_map indexes both with one scored_idx.
         sub_idx = None
         if self.ratemap_n_sub > 0:
             sub_idx = np.sort(rng.choice(N, size=min(self.ratemap_n_sub, N),
