@@ -71,7 +71,7 @@ class ExperimentConfig:
     ratemap_bins:     int   = 40
     ratemap_n_sub:    int   = 0
     ratemap_n_shuffle: int  = 0
-    ratemap_n_null:   int   = 300
+    ratemap_n_null:   int   = 0
     ratemap_seed:     int   = 0
     ratemap_active_thresh: float = 1e-3
 
