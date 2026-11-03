@@ -7,6 +7,8 @@ This module provides functions to visualize:
 1. CAN activity states
 2. QAN trajectories, bump tracking, and path-integration error
 3. Held-normal error of the plane estimator
+
+Figures that compare stored experiment runs live in analysis.experiment_figures.
 """
 from made.visuals import clean_axes
 from model.metrics import wrapped_angle_diff, unwrap_torus, tracking_score
@@ -14,6 +16,9 @@ from model.metrics import wrapped_angle_diff, unwrap_torus, tracking_score
 import matplotlib.pyplot as plt
 import numpy as np
 from itertools import combinations
+
+# Search plot on a 250_000-step walk uses len // 200, which is this window.
+MEAN_ERROR_WINDOW = 1250
 
 # defined once
 def slice_specs(d: int):
@@ -135,19 +140,36 @@ def visualize_trajectory_projections(traj, decoded=None, title="Torus trajectory
     return fig, axes
 
 
-def plot_pi_error(gt, decoded, title="Path-integration error", steps=True):
+def accumulated_error(gt, decoded):
+    """Unwrapped path-integration error at each step, in radians."""
+    accumulated = unwrap_torus(np.asarray(decoded)) - unwrap_torus(np.asarray(gt))
+    return np.linalg.norm(accumulated, axis=1)
+
+
+def rolling_mean(y, window):
+    """Trailing mean. The time index is the last step inside the window."""
+    y = np.asarray(y, dtype=float)
+    win = min(int(window), int(y.size))
+    if win <= 1:
+        return np.arange(y.size), y
+    smooth = np.convolve(y, np.ones(win) / win, mode="valid")
+    return np.arange(win - 1, y.size), smooth
+
+
+def plot_pi_error(gt, decoded, title="Path-integration error", steps=True,
+                  mean_window=MEAN_ERROR_WINDOW):
     """Torus positions in radians.
 
-    The left panel is the accumulated error. With ``steps=True``, the right
-    panel is the typical decoded step against the true step. ``steps=False``
-    drops that panel.
+    The left panel is the accumulated error. The bold line is a trailing mean
+    over ``mean_window`` steps, the same window as the search's longer walk.
+    With ``steps=True``, the right panel is the typical decoded step against
+    the true step. ``steps=False`` drops that panel.
     """
     gt, decoded = np.asarray(gt), np.asarray(decoded)
     if max(np.max(np.abs(gt)), np.max(np.abs(decoded))) < 1.5:
         print("WARNING: input looks like metres, not radians.")
 
-    accumulated = unwrap_torus(decoded) - unwrap_torus(gt)
-    err = np.linalg.norm(accumulated, axis=1)
+    err = accumulated_error(gt, decoded)
     score = tracking_score(decoded, gt)
     med = float(np.median(err))
 
@@ -182,10 +204,10 @@ def plot_pi_error(gt, decoded, title="Path-integration error", steps=True):
         ax = err_ax
 
     err_ax.plot(err, color="#d6604d", lw=0.4, alpha=0.45)
-    win = max(1, len(err) // 200)
+    t_mean, smooth = rolling_mean(err, mean_window)
+    win = len(err) - len(smooth) + 1
     if win > 1:
-        smooth = np.convolve(err, np.ones(win) / win, mode="valid")
-        err_ax.plot(np.arange(win - 1, len(err)), smooth, color="#2166ac", lw=1.4,
+        err_ax.plot(t_mean, smooth, color="#2166ac", lw=1.4,
                     label=f"mean over {win} steps")
         err_ax.legend(fontsize=8)
     err_ax.set(title="accumulated error", xlabel="timestep", ylabel="error (rad)")

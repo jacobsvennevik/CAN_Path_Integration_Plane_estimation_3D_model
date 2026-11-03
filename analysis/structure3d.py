@@ -11,8 +11,6 @@ from .rate_maps import (
 # 24 headings × 30 pitches = 720 planes. Pitch steps of 3° land on the 60° cone.
 GRIEVES_N_AZIMUTH = 24
 GRIEVES_N_PITCH = 30
-# Close-packed hexagonal planes sit at arccos(1/3) ≈ 70.53° from one another.
-# 72° is that angle rounded; the rings are read at the exact angle.
 GRIEVES_PITCH_HEX = float(np.degrees(np.arccos(1.0 / 3.0)))
 # Angle between a close-packed hexagonal plane and a square plane: arccos(1/√3).
 GRIEVES_PITCH_SQUARE = float(np.degrees(np.arccos(1.0 / np.sqrt(3.0))))
@@ -100,24 +98,6 @@ def _best_hex_azimuths(hgs_at_pitch: np.ndarray):
 
 def grieves_chi_1cell(ac_cell: np.ndarray) -> np.ndarray:
     """(3,) structure scores (fcc, hcp, col) for one 3-D autocorrelogram.
-
-    Each score is a difference of medians, χ = α − β, taken after the cube is
-    rotated so the slice with the highest hexagonal gridness lies flat. Pitch is
-    then the tilt away from that best plane. Slices with no annulus are left
-    out of both medians.
-
-    The 720-plane sweep is 24 azimuths by 30 pitches. It finds the best plane
-    and supplies x_COL. Hexagonal headings are then the three azimuths 120°
-    apart with the largest total HGS at pitch arccos(1/3) ≈ 70.53° (the 72°
-    and 70.5° figures in the arrangement table). Square headings for FCC sit
-    60° away from those. The square pitch is arccos(1/√3) ≈ 54.7°. Neither
-    pitch lies on the 3° grid, so those slices are cut on their own.
-
-    x_FCC compares square gridness at 54.7° on the offset headings with the
-    same pitch on the hexagonal headings. x_HCP compares square gridness at
-    54.7° and at 70.53° on the hexagonal headings. x_COL compares hexagonal
-    gridness within 60° of the best plane with hexagonal gridness at the
-    steeper pitches.
     """
     ac = np.asarray(ac_cell, dtype=float)
     if ac.ndim == 4:
@@ -185,9 +165,6 @@ def autocorrelation_1cell(f_cell: np.ndarray) -> np.ndarray:
 def _rotate_cube_to_horizontal(cube: np.ndarray, az: float, al: float) -> np.ndarray:
     """Resample an autocorrelation cube so the (az, al) slice lies in z = 0.
 
-    `oblique_slice` reads that slice at coordinates rot_x(horizontal, az, al).
-    Sampling the original cube at those coordinates puts the slice flat.
-    Negating the angles is not the inverse: azimuth and altitude do not commute.
     """
     from scipy.interpolate import RegularGridInterpolator
     d = cube.shape[0]
@@ -230,8 +207,7 @@ def _stream_structure_scores(f: np.ndarray, bins: int, n_jobs: int = 1) -> tuple
             chi_out[:, k] = chi_k
             mra_out[k] = mra_k
     else:
-        # spread neurons over cores; pin each worker to one thread so
-        # scipy/BLAS don't fight over cores
+
         from joblib import Parallel, delayed, parallel_backend
         with parallel_backend("loky", inner_max_num_threads=1):
             results = Parallel(n_jobs=n_jobs)(
@@ -241,9 +217,6 @@ def _stream_structure_scores(f: np.ndarray, bins: int, n_jobs: int = 1) -> tuple
             chi_out[:, k] = chi_k
             mra_out[k] = mra_k
 
-    # A missing annulus is NaN and stays out of the median. A measured zero is a
-    # real score: an HCP cell is supposed to give x_FCC near zero. "No ring" means
-    # none of the three differences could be computed.
     ring_found = np.isfinite(chi_out).any(axis=0)
     return chi_out, mra_out, ring_found
 
@@ -276,7 +249,8 @@ def _online_shuffle_zscores(
     Returns
     -------
     (sinfo_z, sidx_z)  both (n_scored,) float64
-        Rule of thumb: Z of 2.58 or more means 99% sure (Gong and Yu, Figure 4).
+        Each value is that cell against its own shifts. Spatial information is
+        selective above +1.96. Sparsity is selective below -1.96.
     """
     n_shuffle = shuf_sums.shape[0]
     n_scored  = len(scored_idx)
@@ -294,6 +268,13 @@ def _online_shuffle_zscores(
     sinfo_z = (sinfo - sinfo_shuf.mean(0)) / (sinfo_shuf.std(0) + 1e-9)
     sidx_z  = (sidx  - sidx_shuf.mean(0))  / (sidx_shuf.std(0)  + 1e-9)
     return sinfo_z.astype(np.float64), sidx_z.astype(np.float64)
+
+
+def _field_scores(fields):
+    """All-pairs distances, field counts, and the nearest-neighbour CV."""
+    if not fields:
+        return dict(ifd=None, n_fields=None, ifd_cv=None)
+    return dict(ifd=fields["ifd"], n_fields=fields["n_fields"], ifd_cv=fields["ifd_cv"])
 
 
 def score_3d_from_map(
@@ -314,10 +295,6 @@ def score_3d_from_map(
     """Score a 3-D rate map we already built. No .npz file, no ScoringInput needed.
 
     `positions` (T, 3) in metres and `activity` (T, n_cells) are the trace
-    inter-field distance clusters. `n_cells` is the same axis as `sums`.
-    Without them, `ifd` is None. Structure scores are the Grieves differences.
-
-    Note (Gong and Yu, Figure 4): Z of 2.58 or more.
     """
     bins    = sums.shape[0]
     n_total = sums.shape[-1]
@@ -328,7 +305,8 @@ def score_3d_from_map(
     if len(scored_idx) == 0:
         warnings.warn("score_3d_from_map: no active neurons to score.", UserWarning, stacklevel=2)
         return dict(chi=None, mra=None, ring_found=None,
-                    sinfo=None, sidx=None, sinfo_z=None, sidx_z=None, ifd=None,
+                    sinfo=None, sidx=None, sinfo_z=None, sidx_z=None,
+                    ifd=None, n_fields=None, ifd_cv=None,
                     occupancy=0.0, reliable=False,
                     scored_idx=scored_idx, bins=bins)
 
@@ -358,13 +336,13 @@ def score_3d_from_map(
         if shuf_sums is not None:
             sinfo_z, sidx_z = _online_shuffle_zscores(
                 shuf_sums, scored_idx, counts, p, sigma, sinfo, sidx)
-        ifd = _ifd_for_scored(positions, activity, scored_idx, grid_spacing, env_size)
+        fields = _ifd_for_scored(positions, activity, scored_idx, grid_spacing, env_size)
         return dict(
             chi=np.full((3, n_scored), np.nan),
             mra=np.full((n_scored, rmax), np.nan),
             ring_found=np.zeros(n_scored, bool),
             sinfo=sinfo, sidx=sidx, sinfo_z=sinfo_z, sidx_z=sidx_z,
-            ifd=ifd,
+            **_field_scores(fields),
             occupancy=occ, reliable=False,
             scored_idx=scored_idx, bins=bins,
         )
@@ -386,14 +364,14 @@ def score_3d_from_map(
             shuf_sums, scored_idx, counts, p, sigma, sinfo, sidx)
     # the structure scores, one neuron at a time
     chi_out, mra_out, ring_found = _stream_structure_scores(f, bins, n_jobs=n_jobs)
-    ifd = _ifd_for_scored(positions, activity, scored_idx, grid_spacing, env_size)
+    fields = _ifd_for_scored(positions, activity, scored_idx, grid_spacing, env_size)
 
     return dict(
         chi=chi_out, mra=mra_out,
         ring_found=ring_found,
         sinfo=sinfo, sidx=sidx,
         sinfo_z=sinfo_z, sidx_z=sidx_z,
-        ifd=ifd,
+        **_field_scores(fields),
         occupancy=occ, reliable=reliable,
         scored_idx=scored_idx, bins=bins,
     )

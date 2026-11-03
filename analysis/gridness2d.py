@@ -86,33 +86,39 @@ def hex_gridness_2d(ac2d: np.ndarray, peak_thresh: float = 0.1,
     return hgs, sgs
 
 
-def _shift_info_z(shuf_sums, counts, scored_idx, p, sigma, sinfo, sidx):
-    """_shift_info_z turns the time-shifted maps into z-scores for spatial information and sparsity. 
-    Comparing the real scores (sinfo, sidx) with the same scores on the shuffles (shuf_sums).
-    """
-    scored_idx = np.asarray(scored_idx, dtype=int)
+def _own_shift_sample(sums, counts, shuf_sums, shuffle_idx, active_mask, p, sigma):
+    """Score the shifted cells z-scores"""
+    shuffle_idx = np.asarray(shuffle_idx, dtype=int)
+    #Number of shuffled maps
+    n_shuf = int(shuf_sums.shape[-1])
+
+    #Check that the shuffle index is the same length as the number of shuffled maps
+    if shuffle_idx.shape != (n_shuf,):
+        raise ValueError(
+            f"shuffle_idx length {shuffle_idx.size} does not match "
+            f"the shuffle cell axis {n_shuf}"
+        )
+    #If no active mask, keep all cells
+    if active_mask is None:
+        keep = np.ones(n_shuf, dtype=bool)
+    else:
+        keep = np.asarray(active_mask, dtype=bool)[shuffle_idx]
     
-    #check atleast one cell is scored and index checkk
-    per_cell = scored_idx.size and int(scored_idx.max()) < shuf_sums.shape[-1]
-    if per_cell:
-        #compuute z-scores for for spatial information and sparsity
-        return _online_shuffle_zscores(
-            shuf_sums, scored_idx, counts, p, sigma, sinfo, sidx)
-        
-    #if not, shuffled sets are pooled
-    n_shifts = shuf_sums.shape[0]
-    sinfo_n = np.empty((n_shifts, shuf_sums.shape[-1]), dtype=np.float64)
-    sidx_n = np.empty_like(sinfo_n)
+    #sheet index of the shuffled maps
+    info_idx = shuffle_idx[keep]
+    empty = np.array([], dtype=np.float64)
+    if info_idx.size == 0:
+        return empty, empty.copy(), empty.copy(), empty.copy(), info_idx
+    f_info = _rate_map_from_accumulator(sums[..., info_idx], counts, sigma=sigma)
     
-    #For each shift, the accumulated sums are turned into a smoothed rate
-    for j in range(n_shifts):
-        f_j = _rate_map_from_accumulator(shuf_sums[j], counts, sigma=sigma)
-        sinfo_n[j] = _spatial_info(p, f_j)
-        sidx_n[j] = _sparsity_idx(p, f_j)
-    return (
-        (sinfo - np.nanmean(sinfo_n)) / (np.nanstd(sinfo_n) + 1e-9),
-        (sidx - np.nanmean(sidx_n)) / (np.nanstd(sidx_n) + 1e-9),
+    #z-score the values of the ratemap
+    sinfo = _spatial_info(p, f_info)
+    sidx = _sparsity_idx(p, f_info)
+    sinfo_z, sidx_z = _online_shuffle_zscores(
+        shuf_sums[..., keep], np.arange(info_idx.size), counts,
+        p, sigma, sinfo, sidx,
     )
+    return sinfo, sidx, sinfo_z, sidx_z, info_idx
 
 
 def hgs_shift_null(shuf_sums, counts, scored_idx=None, sigma=SMOOTH_SIGMA):
@@ -180,11 +186,10 @@ def score_2d_from_map(
     sigma: float = SMOOTH_SIGMA,
     active_mask: np.ndarray | None = None,
     shuf_sums: np.ndarray | None = None,
+    shuffle_idx: np.ndarray | None = None,
     occ_warn: float = 0.3,
 ) -> dict:
     """Score a 2-D rate map already built by run_with_online_ratemap.
-
-
     """
     bins    = sums.shape[0]
     n_total = sums.shape[-1]
@@ -227,12 +232,13 @@ def score_2d_from_map(
 
     sinfo = _spatial_info(p, f)
     sidx  = _sparsity_idx(p, f)
+    info_idx = scored_idx
 
     sinfo_z, sidx_z = None, None
     hgs_shuf = None
     hgs_shuf_p95 = None
     hgs_shuf_ring_frac = None
-    
+
     # Score already-shifted maps, take the 95th percentile of HGS as the chance.
     if shuf_sums is not None:
         null_idx = None if separate_null else scored_idx
@@ -243,9 +249,17 @@ def score_2d_from_map(
             else float("nan")
         )  # chance floor
         hgs_shuf_ring_frac = float(finite.mean())  # how often a ring appeared
-        z_idx = np.array([], dtype=int) if separate_null else scored_idx
-        sinfo_z, sidx_z = _shift_info_z(
-            shuf_sums, counts, z_idx, p, sigma, sinfo, sidx)
+        if separate_null:
+            if shuffle_idx is None:
+                raise ValueError(
+                    "these shuffle maps are not the scored cells; pass shuffle_idx "
+                    "so each z-score uses that cell's own shifts"
+                )
+            sinfo, sidx, sinfo_z, sidx_z, info_idx = _own_shift_sample(
+                sums, counts, shuf_sums, shuffle_idx, active_mask, p, sigma)
+        else:
+            sinfo_z, sidx_z = _online_shuffle_zscores(
+                shuf_sums, scored_idx, counts, p, sigma, sinfo, sidx)
 
     return dict(
         #NOTE: not everything nessesarry probably
@@ -258,6 +272,7 @@ def score_2d_from_map(
         sidx       = sidx,
         sinfo_z    = sinfo_z,
         sidx_z     = sidx_z,
+        info_idx   = info_idx,
         hgs_shuf   = hgs_shuf,
         hgs_shuf_p95 = hgs_shuf_p95,
         hgs_shuf_ring_frac = hgs_shuf_ring_frac,

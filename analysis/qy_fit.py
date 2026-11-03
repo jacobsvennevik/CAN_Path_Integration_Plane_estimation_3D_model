@@ -587,10 +587,6 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
     fired = np.stack([item["n_spikes"] for item in drawn], axis=0) > 0
 
     device = _scoring_device()
-    if device.type == "cuda":
-        print(f"qy device {device}  {torch.cuda.get_device_name(device)}")
-    else:
-        print(f"qy device {device}")
     workers = _default_jobs() if n_jobs is None else int(n_jobs)
     # One GPU: spacings stay in this process and reuse the uploaded counts.
     if device.type != "cpu":

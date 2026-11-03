@@ -2,7 +2,7 @@
 import warnings
 import numpy as np
 from scipy.ndimage import gaussian_filter
-from scipy.spatial.distance import pdist
+from scipy.spatial.distance import pdist, squareform
 
 from config import world_to_normalized, world_to_flat_bins, AnalysisConfig
 from . import gongyu_scoring as gy
@@ -59,30 +59,46 @@ def field_kernel(grid_spacing: float, env_size: float) -> tuple:
     return bandwidth, ignore_range
 
 
-def inter_field_distances(activity_pct: float = 90.0,
-                          bandwidth: float | None = None, min_bin_freq: int = 25,
-                          min_cluster_size: int = 30,
-                          ignore_range: float | None = None,
-                          positions: np.ndarray | None = None,
-                          activity: np.ndarray | None = None,
-                          grid_spacing: float | None = None,
-                          env_size: float | None = None,
-                          world_coords: bool = False) -> dict:
-    """Distances between activity-field centers of each cell.
+def local_spacing_cv(centers: np.ndarray, n_neighbours: int = 3) -> float:
+    """Spread of each field's nearest-neighbour distances, as s.d. / mean.
 
-    A field center is the mean of one MeanShift cluster. The points in a cluster
-    are the positions where that cell's activity was at or above its 90th
-    percentile. This cut is only used here; rate maps and gridness use the
-    continuous activity.
+    uses the distances from each field to its three nearest neighbours, and a low value means those
+    distances agree. A cell needs at least four fields, so that three
+    neighbours exist. An edge is counted from both ends when both fields list
+    each other.
+    """
+    centers = np.asarray(centers, dtype=float)
+    k = int(n_neighbours)
+    if centers.ndim != 2 or len(centers) < k + 1:
+        return float("nan")
+    dist = squareform(pdist(centers))
+    np.fill_diagonal(dist, np.inf)
+    nearest = np.partition(dist, k - 1, axis=1)[:, :k]
+    mean = float(nearest.mean())
+    if mean <= 0.0:
+        return float("nan")
+    return float(nearest.std(ddof=1) / mean)
 
-    `positions` is (T, 3) and `activity` is (T, n). World positions in metres
-    are normalised when `world_coords` is set. `grid_spacing` and `env_size`
-    are required.
+
+def _field_centers(activity_pct: float = 90.0,
+                   bandwidth: float | None = None, min_bin_freq: int = 25,
+                   min_cluster_size: int = 30,
+                   ignore_range: float | None = None,
+                   positions: np.ndarray | None = None,
+                   activity: np.ndarray | None = None,
+                   grid_spacing: float | None = None,
+                   env_size: float | None = None,
+                   world_coords: bool = False) -> dict:
+    """MeanShift field centres for each cell, in the normalised cube.
+
+    The points clustered are the positions where that cell's activity was at
+    or above its 90th percentile. Rate maps do not use this cut. A centre is
+    the mean of one surviving cluster.
     """
     if positions is None or activity is None:
-        raise ValueError("inter_field_distances needs positions and activity")
+        raise ValueError("field centres need positions and activity")
     if grid_spacing is None or env_size is None:
-        raise ValueError("inter_field_distances needs grid_spacing and env_size")
+        raise ValueError("field centres need grid_spacing and env_size")
     if bandwidth is None or ignore_range is None:
         bw, ir = field_kernel(grid_spacing, env_size)
         if bandwidth is None:
@@ -94,11 +110,12 @@ def inter_field_distances(activity_pct: float = 90.0,
 
     out = {}
     n = activity.shape[1]
+    empty = np.empty((0, positions.shape[1]))
     for k in range(n):
-        threshold  = np.percentile(activity[:, k], activity_pct)
+        threshold = np.percentile(activity[:, k], activity_pct)
         active_pos = positions[activity[:, k] >= threshold]
-        if len(active_pos) < min_bin_freq:        # too few points to seed a bin
-            out[k] = np.array([])
+        if len(active_pos) < min_bin_freq:
+            out[k] = empty
             continue
         try:
             _, _, centers = gy.ms_cluster(
@@ -106,8 +123,31 @@ def inter_field_distances(activity_pct: float = 90.0,
                 min_cluster_size=min_cluster_size, ignore_range=ignore_range,
                 plot=False)
         except ValueError:
-            out[k] = np.array([])                 # MeanShift found no seeds
+            out[k] = empty
             continue
+        out[k] = centers
+    return out
+
+
+def inter_field_distances(activity_pct: float = 90.0,
+                          bandwidth: float | None = None, min_bin_freq: int = 25,
+                          min_cluster_size: int = 30,
+                          ignore_range: float | None = None,
+                          positions: np.ndarray | None = None,
+                          activity: np.ndarray | None = None,
+                          grid_spacing: float | None = None,
+                          env_size: float | None = None,
+                          world_coords: bool = False) -> dict:
+    """Finds the centers of the fields for each cell. Replace them with distance between the fields.
+    """
+    centers_of = _field_centers(
+        activity_pct=activity_pct, bandwidth=bandwidth, min_bin_freq=min_bin_freq,
+        min_cluster_size=min_cluster_size, ignore_range=ignore_range,
+        positions=positions, activity=activity, grid_spacing=grid_spacing,
+        env_size=env_size, world_coords=world_coords,
+    )
+    out = {}
+    for k, centers in centers_of.items():
         out[k] = pdist(centers) if len(centers) >= 2 else np.array([])
     return out
 
@@ -143,10 +183,7 @@ def _rate_map_from_accumulator(sums: np.ndarray, counts: np.ndarray,
 
 
 def _ifd_for_scored(positions, activity, scored_idx, grid_spacing, env_size):
-    """Inter-field distances for the cells `score_3d_from_map` keeps.
-
-    `activity` columns match the rate-map axis. Keys of the returned dict are
-    indices into the scored-cell axis, the same axis as `chi`.
+    """Score (find the IFD) the distances between the fields for each cell.
     """
     if positions is None or activity is None:
         return None
@@ -156,10 +193,22 @@ def _ifd_for_scored(positions, activity, scored_idx, grid_spacing, env_size):
             f"activity cell axis {getattr(activity, 'shape', None)} does not cover "
             f"scored index {int(np.max(scored_idx))}"
         )
-    return inter_field_distances(
+    centers_of = _field_centers(
         positions=np.asarray(positions),
         activity=activity[:, scored_idx],
         grid_spacing=grid_spacing,
         env_size=env_size,
         world_coords=True,
     )
+    n = activity[:, scored_idx].shape[1]
+    ifd = {}
+    n_fields = np.zeros(n, dtype=int)
+    ifd_cv = np.full(n, np.nan)
+    #loop thorugh each cell and find the scores
+    for k, centers in centers_of.items():
+        n_fields[k] = len(centers)
+        #find the distance between the fields for each cell
+        ifd[k] = pdist(centers) if len(centers) >= 2 else np.array([])
+        #find the nearest-neighbour CV for each cell
+        ifd_cv[k] = local_spacing_cv(centers)
+    return dict(ifd=ifd, n_fields=n_fields, ifd_cv=ifd_cv)
