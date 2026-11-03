@@ -148,11 +148,42 @@ def make_route(P, wall_in, cfg, w, rng, max_len_m=20.0):
     )
 
 
+def face_inward(point, limit, tol=1e-6):
+    """Unit direction straight into the box from a point on one or more walls."""
+    point = np.asarray(point, dtype=float)
+    inward = np.zeros(3)
+    for axis in range(3):
+        if point[axis] >= limit - tol:
+            inward[axis] = -1.0
+        elif point[axis] <= -limit + tol:
+            inward[axis] = 1.0
+    norm = float(np.linalg.norm(inward))
+    if norm < 1e-12:
+        raise RuntimeError(f"point is not on a wall: {point}")
+    return inward / norm
+
+
+def _wall_hits(world, limit, tol=1e-6):
+    """Mark samples that sit on a face. Sign is which side of that axis."""
+    world = np.asarray(world, dtype=float)
+    hits = np.zeros(world.shape, dtype=np.int8)
+    limit = float(limit)
+    for axis in range(3):
+        hits[world[:, axis] >= limit - tol, axis] = 1
+        hits[world[:, axis] <= -limit + tol, axis] = -1
+    return hits
+
+
 def build_routes(cfg, w, rng, max_draws=None):
-    """Draw until rotes until we have enough routes."""
-    P = np.asarray(HOME_PERCH, dtype=float)
+    """Draw until rotes until we have enough routes.
+
+    With chain_from_wall, the next flight leaves the landing of the last one.
+    Otherwise every flight leaves the perch.
+    """
+    P = np.asarray(HOME_PERCH, dtype=float).copy()
     # Into the box from the perch on the left wall, (-1, 0, 0).
     wall_in = np.array([1.0, 0.0, 0.0])
+    chain = bool(getattr(cfg, "chain_from_wall", False))
     n_routes = int(cfg.n_routes)
     if max_draws is None:
         max_draws = 20 * n_routes
@@ -169,8 +200,12 @@ def build_routes(cfg, w, rng, max_draws=None):
             )
         drawn += 1
         route = make_route(P, wall_in, cfg, w, rng)
-        if route is not None:
-            kept.append(route)
+        if route is None:
+            continue
+        kept.append(route)
+        if chain:
+            P = route["Q"].copy()
+            wall_in = face_inward(P, w.limit)
     return kept, drawn
 
 
@@ -204,11 +239,17 @@ def _push(blocks, pos, vel, segment, route_label, flight_label, plane):
     blocks["plane"].append(np.full(n_rows, int(plane), dtype=int))
 
 
-def _route_table(routes):
-    """One outbound row and one return row for each stored flight."""
+def _route_table(routes, chain=False):
+    """One outbound row and one return row for each stored flight.
+
+    A chained walk has no return, so each flight keeps a single route id.
+    """
     rows = []
     for r, route in enumerate(routes):
         n_true = np.asarray(route["n_true"], dtype=float).copy()
+        if chain:
+            rows.append({"route": r, "n_fit": n_true.copy()})
+            continue
         rows.append({"route": 2 * r, "n_fit": n_true.copy()})
         rows.append({"route": 2 * r + 1, "n_fit": n_true.copy()})
     return rows
@@ -222,8 +263,13 @@ def make_planar_routes_trajectory(cfg, dt, scale, dim, rng=None, turn_std=None):
         rng = w.rng
     
     #build the routes and the schedule
+    chain = bool(getattr(cfg, "chain_from_wall", False))
     routes, n_drawn = build_routes(cfg, w, rng)
-    schedule = build_schedule(cfg.n_routes, cfg.round_trips, rng)
+    if chain:
+        # Order is the walk. A shuffle would jump back to an earlier wall.
+        schedule = np.arange(len(routes))
+    else:
+        schedule = build_schedule(cfg.n_routes, cfg.round_trips, rng)
     
     #Create the container for the blocks, and define parametes
     blocks = _blank()
@@ -238,6 +284,23 @@ def make_planar_routes_trajectory(cfg, dt, scale, dim, rng=None, turn_std=None):
         #pick the stored flight for that round trip
         base = int(base)
         route = routes[base]
+        if chain:
+            pos = route["positions"]
+            vel = route["velocities"]
+            # The first sample repeats the previous landing, with a zero step.
+            if trip > 0:
+                pos = pos[1:]
+                vel = vel[1:]
+            starts.append(t)
+            t0 = int(t)
+            _push(blocks, pos, vel, trip, base, flight, base)
+            t += len(pos)
+            flight_table.append(dict(
+                flight=int(flight), route=int(base), base_route=base,
+                direction="out", t0=int(t0), t1=int(t),
+            ))
+            flight += 1
+            continue
         #how many times this flight has been used already
         repeat = int(seen[base])
         seen[base] += 1
@@ -291,17 +354,22 @@ def make_planar_routes_trajectory(cfg, dt, scale, dim, rng=None, turn_std=None):
         segment_starts=np.asarray(starts, dtype=int),
         plane_id=plane_ids,
         flight_of=flight_of,
-        route_table=_route_table(routes),
+        route_table=_route_table(routes, chain=chain),
         flight_table=flight_table,
         n_route_draws=int(n_drawn),
+        wall_hits=_wall_hits(world, w.limit) if chain else None,
     )
 
 
 @dataclass
 class Arena3DPlanarRoutesConfig(ExperimentConfig):
-    """Round trips of stored flights from one perch."""
+    """Round trips of stored flights from one perch.
+
+    chain_from_wall flies each route once and starts the next at the landing.
+    """
     n_routes: int = 40
     round_trips: int = 10
+    chain_from_wall: bool = False
     takeoff_spread_deg: float = 60.0
     tilt_min_deg: float = 25.0
     tilt_max_deg: float = 50.0

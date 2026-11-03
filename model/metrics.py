@@ -28,7 +28,8 @@ def torus_error(decoded, truth):
 
 
 def tracking_score(decoded, truth, step_weight=5.0):
-    """Path-integration score: mean unwrap error / mean unwrap path length.
+    """Path-integration score: mean unwrap error / mean unwrap path length. 
+    We also add a penalty for step by step mismatch.
 
     Dimensionless. 0 is perfect; 1 means the error is as large as the walk.
     """

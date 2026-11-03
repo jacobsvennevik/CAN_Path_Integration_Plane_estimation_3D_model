@@ -212,7 +212,8 @@ class ExperimentResult:
     ratemap_sums:      np.ndarray = None
     ratemap_counts:    np.ndarray = None
     sub_idx: np.ndarray = None   # neuron subsample indices (3-D path)
-    shuf_sums:         np.ndarray = None   # (n_shuffle, bins, ..., n_sub) shuffle maps
+    shuf_sums:         np.ndarray = None   # (n_shuffle, bins, ..., n_cells) shifted maps
+    null_idx:          np.ndarray = None   # sheet index of each shuffle column, when it is not the rate map
     active_mask:       np.ndarray = None   # (n_sub,) bool — neurons with non-trivial activity
     kappa_hist:        np.ndarray = None  # vMF κ
     snapshots:         np.ndarray = None  # sheet frames during the walk
@@ -387,6 +388,7 @@ class BaseExperiment:
             refresh_mask=np.asarray(refresh_mask, dtype=bool),
             sub_idx=sub_idx,
             shuf_sums=integrator.ratemap_shuf_sums,
+            null_idx=null_idx,
             active_mask=active_mask,
             kappa_hist=kappa,
             snapshots=getattr(integrator.backend, "snapshots", None),
