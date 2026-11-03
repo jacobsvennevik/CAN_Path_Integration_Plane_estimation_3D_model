@@ -143,7 +143,11 @@ def grieves_chi_1cell(ac_cell: np.ndarray) -> np.ndarray:
 
 
 def autocorrelation_1cell(f_cell: np.ndarray) -> np.ndarray:
-    """Standardised 3-D autocorrelation of a single cell's rate map.
+    """Per-lag Pearson autocorrelation of one cell's rate map.
+
+    Each lag is the correlation of the voxels where the map and the slid copy
+    both exist. The overlap count is M in that sum, so a large slide is not
+    divided by the empty part of the cube.
 
     Parameters
     ----------
@@ -154,11 +158,22 @@ def autocorrelation_1cell(f_cell: np.ndarray) -> np.ndarray:
     ac : (2b-1, 2b-1, 2b-1) signed autocorrelogram for that cell.
     """
     from scipy.signal import correlate
-    nbins = f_cell.size
-    std = f_cell.std()
-    std = std if std > 1e-10 else 1.0
-    f_ = (f_cell - f_cell.mean()) / std
-    ac = correlate(f_, f_, mode="full") / nbins
+    f = np.asarray(f_cell, dtype=float)
+    ones = np.ones(f.shape, dtype=float)
+    f2 = f * f
+    # Overlap counts are integers. The FFT correlation only comes back near them.
+    n = np.rint(correlate(ones, ones, mode="full"))
+    sum_a = correlate(f, ones, mode="full")
+    sum_b = correlate(ones, f, mode="full")
+    sum_ab = correlate(f, f, mode="full")
+    sum_a2 = correlate(f2, ones, mode="full")
+    sum_b2 = correlate(ones, f2, mode="full")
+    num = n * sum_ab - sum_a * sum_b
+    var_a = np.maximum(n * sum_a2 - sum_a ** 2, 0.0)
+    var_b = np.maximum(n * sum_b2 - sum_b ** 2, 0.0)
+    valid = (n >= 2) & (var_a > 0.0) & (var_b > 0.0)
+    ac = np.zeros(num.shape, dtype=float)
+    np.divide(num, np.sqrt(var_a * var_b), out=ac, where=valid)
     return ac
 
 
