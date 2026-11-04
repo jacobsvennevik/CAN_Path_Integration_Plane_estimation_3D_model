@@ -650,12 +650,28 @@ def fit_routes(positions, activity, flight_of, flight_table, route_table, *,
     return out
 
 
-def qy_fit(traj, field_pos, field_act, stride, **kwargs):
-    """Align the fligh ids (shortening them) to the field trace (shortened recoding), then fit."""
+def _sample_flights(flight_table, route_table, max_flights, seed):
+    """Keep every flight, or draw some random flights."""
+    n = len(flight_table)
+    if max_flights is None or int(max_flights) >= n:
+        return flight_table, route_table
+    chosen = np.random.default_rng(seed).choice(n, size=int(max_flights), replace=False)
+    flights = [flight_table[int(i)] for i in chosen]
+    needed = {int(row["route"]) for row in flights}
+    routes = [row for row in route_table if int(row["route"]) in needed]
+    return flights, routes
+
+
+def qy_fit(traj, field_pos, field_act, stride, max_flights=None, **kwargs):
+    """Align the flight ids to the field trace, then fit. Also draw some random flights for scoring if wanted
+    """
     n_samp = len(field_pos)
     flight_of = align_field_trace(traj.flight_of, stride, n_samp)
+    flights, routes = _sample_flights(
+        traj.flight_table, traj.route_table, max_flights, kwargs.get("seed"),
+    )
     return fit_routes(
-        field_pos, field_act, flight_of, traj.flight_table, traj.route_table,
+        field_pos, field_act, flight_of, flights, routes,
         **kwargs,
     )
 

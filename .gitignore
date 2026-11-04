@@ -225,3 +225,6 @@ myenv/
 # Results / large outputs
 notebooks/path_integration/runs/*
 *.npz
+
+#Development scripts
+scripts/
