@@ -27,6 +27,14 @@ def torus_error(decoded, truth):
     )
 
 
+def unwrapped_error(decoded, truth, period=2 * np.pi):
+    """Euclidean length of the unwrapped path error at the last step, in radians."""
+    decoded = np.asarray(decoded, dtype=float)
+    truth = np.asarray(truth, dtype=float)
+    diff = (unwrap_torus(decoded, period=period) - unwrap_torus(truth, period=period))[-1]
+    return float(np.linalg.norm(diff))
+
+
 def tracking_score(decoded, truth, step_weight=5.0):
     """Path-integration score: mean unwrap error / mean unwrap path length. 
     We also add a penalty for step by step mismatch.

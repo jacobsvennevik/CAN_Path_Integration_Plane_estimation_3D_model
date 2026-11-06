@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import numpy as np
 
-from model.metrics import torus_error, tracking_score
+from model.metrics import torus_error, tracking_score, unwrapped_error
 from model.path_integration import PathIntegrator, build_rotation_matrix
 from config import world_to_flat_bins
 from model.network.QAN3D import Torus3DQAN
@@ -224,6 +224,7 @@ class ExperimentResult:
     field_pos:         np.ndarray = None   # (n_samples, 3) metres, volumetric IFD
     field_act:         np.ndarray = None   # (n_samples, n_sub) activity trace
     field_stride:      int = 1
+    unwrapped_error_rad: float = None  # last-step unwrapped path error, radians
 
 
 class BaseExperiment:
@@ -357,6 +358,7 @@ class BaseExperiment:
         n_held_hist = np.asarray(integrator.history["n_held"])
         n_sheet = int(integrator.backend.n)
         torus_err = torus_error(theta_hist, torus_gt)
+        unwrapped_final = unwrapped_error(theta_hist, torus_gt)
         score = tracking_score(theta_hist, torus_gt)
 
         active_mask = None
@@ -402,4 +404,5 @@ class BaseExperiment:
             field_pos=getattr(integrator, "field_pos", None),
             field_act=getattr(integrator, "field_act", None),
             field_stride=int(getattr(integrator, "field_stride", None) or 1),
+            unwrapped_error_rad=unwrapped_final,
         )
