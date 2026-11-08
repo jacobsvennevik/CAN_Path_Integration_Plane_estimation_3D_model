@@ -27,12 +27,22 @@ def torus_error(decoded, truth):
     )
 
 
-def unwrapped_error(decoded, truth, period=2 * np.pi):
-    """Euclidean length of the unwrapped path error at the last step, in radians."""
+def unwrapped_error_steps(decoded, truth, period=2 * np.pi):
+    """Unwrapped Euclidean error at every step, in radians. Never folds back to 0."""
     decoded = np.asarray(decoded, dtype=float)
     truth = np.asarray(truth, dtype=float)
-    diff = (unwrap_torus(decoded, period=period) - unwrap_torus(truth, period=period))[-1]
-    return float(np.linalg.norm(diff))
+    diff = unwrap_torus(decoded, period) - unwrap_torus(truth, period)
+    # take the t=0 offset the short way round
+    diff += wrapped_angle_diff(decoded[0], truth[0], period) - diff[0]
+    return np.linalg.norm(diff, axis=1)
+
+
+def unwrapped_error(decoded, truth, period=2 * np.pi):
+    """Euclidean length of the unwrapped path error at the last step, in radians.
+
+    The starting offset is the short way around the torus. Drift after that is not folded.
+    """
+    return float(unwrapped_error_steps(decoded, truth, period=period)[-1])
 
 
 def tracking_score(decoded, truth, step_weight=5.0):
@@ -44,8 +54,7 @@ def tracking_score(decoded, truth, step_weight=5.0):
     decoded = np.asarray(decoded, dtype=float)
     truth = np.asarray(truth, dtype=float)
     dec_path = unwrap_torus(decoded)
-    gt_path = unwrap_torus(truth)
-    error = np.linalg.norm(dec_path - gt_path, axis=1)
+    error = unwrapped_error_steps(decoded, truth)
     gt_step = wrapped_angle_diff(truth[1:], truth[:-1], period=2 * np.pi)
     path_length = np.concatenate(
         [[0.0], np.cumsum(np.linalg.norm(gt_step, axis=1))]

@@ -11,7 +11,9 @@ This module provides functions to visualize:
 Figures that compare stored experiment runs live in analysis.experiment_figures.
 """
 from made.visuals import clean_axes
-from model.metrics import wrapped_angle_diff, unwrap_torus, tracking_score
+from model.metrics import (
+    wrapped_angle_diff, unwrap_torus, tracking_score, unwrapped_error_steps,
+)
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -142,8 +144,7 @@ def visualize_trajectory_projections(traj, decoded=None, title="Torus trajectory
 
 def accumulated_error(gt, decoded):
     """Unwrapped path-integration error at each step, in radians."""
-    accumulated = unwrap_torus(np.asarray(decoded)) - unwrap_torus(np.asarray(gt))
-    return np.linalg.norm(accumulated, axis=1)
+    return unwrapped_error_steps(decoded, gt)
 
 
 def rolling_mean(y, window):
