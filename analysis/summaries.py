@@ -66,13 +66,62 @@ def summarize_2d(scores):
     )
 
 
+def pooled_ifd(scores):
+    """All pairwise field distances in one score dict, in the normalised cube."""
+    parts = []
+    for values in (scores.get("ifd") or {}).values():
+        dist = np.asarray(values, dtype=float).ravel()
+        dist = dist[np.isfinite(dist)]
+        if dist.size:
+            parts.append(dist)
+    if not parts:
+        return np.empty(0)
+    return np.concatenate(parts)
+
+
+def pooled_ifd_cv(scores):
+    """Per-cell nearest-neighbour spacing CV stored on one score dict."""
+    cv = scores.get("ifd_cv")
+    if cv is None:
+        return np.empty(0)
+    values = np.asarray(cv, dtype=float).ravel()
+    return values[np.isfinite(values)]
+
+
+def mra_curve(scores):
+    """Stored MRA, shape (cells, radii), or None when this dict has no curve."""
+    mra = scores.get("mra")
+    if mra is None:
+        return None
+    mra = np.asarray(mra, dtype=float)
+    if mra.ndim != 2 or mra.shape[1] == 0:
+        return None
+    return mra
+
+
+def _mra_bin_m(bins, env_size):
+    """Width of one autocorrelation shell in metres."""
+    return float(env_size) / float(bins)
+
+
+def mra_radii_m(n_radii, bins, env_size):
+    """Outer edge of each MRA shell, in metres. Index 0 is the centre."""
+    return np.arange(int(n_radii)) * _mra_bin_m(bins, env_size)
+
+
+def _mra_spacing_index(n_radii, bins, grid_spacing, env_size):
+    """Column whose shell contains the grid spacing."""
+    r_grid = float(grid_spacing) / _mra_bin_m(bins, env_size)
+    return int(np.clip(np.ceil(r_grid), 0, int(n_radii) - 1))
+
+
 def summarize_3d(scores, grid_spacing=None, env_size=None):
-    """One-row summary of score_3d_from_map."""
+    """One-row summary of score_3d_from_map, one flat row of medians and fractions.
+    Missing values become NaN instead of crashing the row.
+    """
     chi = scores.get("chi")
     chi = np.full((3, 0), np.nan) if chi is None else np.asarray(chi, dtype=float)
     ifd = scores.get("ifd") or {}
-    pooled = [np.asarray(v, dtype=float) for v in ifd.values() if len(v)]
-    pooled = np.concatenate(pooled) if pooled else np.array([])
     n_fields = scores.get("n_fields")
     if n_fields is None:
         median_n_fields = float("nan")
@@ -81,12 +130,12 @@ def summarize_3d(scores, grid_spacing=None, env_size=None):
         n_fields = np.asarray(n_fields)
         median_n_fields = float(np.median(n_fields)) if n_fields.size else float("nan")
         frac_local_ifd = float(np.mean(n_fields >= 4)) if n_fields.size else float("nan")
-    mra = scores.get("mra")
+    mra = None
+    if grid_spacing is not None and env_size is not None:
+        mra = mra_curve(scores)
     mra_at = float("nan")
-    if mra is not None and grid_spacing is not None and env_size is not None:
-        mra = np.asarray(mra, dtype=float)
-        r_grid = grid_spacing / (env_size / scores["bins"])
-        r = int(np.clip(round(r_grid), 0, mra.shape[1] - 1))
+    if mra is not None:
+        r = _mra_spacing_index(mra.shape[1], scores["bins"], grid_spacing, env_size)
         mra_at = _median(mra[:, r])
     ring = scores.get("ring_found")
     return dict(
@@ -100,8 +149,8 @@ def summarize_3d(scores, grid_spacing=None, env_size=None):
         median_chi_fcc=_median(chi[0]) if chi.shape[0] else float("nan"),
         median_chi_hcp=_median(chi[1]) if chi.shape[0] > 1 else float("nan"),
         median_chi_col=_median(chi[2]) if chi.shape[0] > 2 else float("nan"),
-        median_ifd=_median(pooled),
-        median_ifd_cv=_median(scores.get("ifd_cv")),
+        median_ifd=_median(pooled_ifd(scores)),
+        median_ifd_cv=_median(pooled_ifd_cv(scores)),
         median_n_fields=median_n_fields,
         frac_local_ifd=frac_local_ifd,
         n_ifd_cells=int(sum(len(v) > 0 for v in ifd.values())),

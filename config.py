@@ -114,6 +114,15 @@ def world_to_normalized(world_pos, env_size):
     return np.clip(world_pos / half, -1.0, 1.0)
 
 
+def normalized_to_metres(values, env_size):
+    """Map the normalised cube back to metres.
+
+    world_to_normalized divides positions by env_size / 2, so half the box is 1.
+    Distances use the same factor and are not clipped.
+    """
+    return np.asarray(values, dtype=float) * (float(env_size) / 2.0)
+
+
 def world_to_flat_bins(world_pos, env_size, bins, ndim=2):
     """Answers which flat bin does each position fall in.
 

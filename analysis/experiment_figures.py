@@ -6,9 +6,12 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import FixedFormatter, FixedLocator, LogLocator, NullLocator
 from matplotlib.transforms import blended_transform_factory
 
+from config import normalized_to_metres
+
 from . import gongyu_scoring as gy
 from .gridness2d import percentile_cells
 from .rate_maps import SMOOTH_SIGMA, _rate_map_from_accumulator, _spatial_info
+from .summaries import mra_curve, mra_radii_m, pooled_ifd, pooled_ifd_cv
 
 
 # Lines through the κ_sens × τ grid. A third line appears when some τ
@@ -528,5 +531,240 @@ def percentile_slices(sums, counts, title, active_mask=None, percentiles=(10, 50
     fig.suptitle(title)
     if vmax is not None:
         fig.colorbar(im, ax=axes, shrink=0.6, label="rate / map mean")
+    return fig
+
+
+#colloirs pr condition
+_CONDITION_COLOR = ("#1F1F1F", "#3D7EBF", "#E07A4C", "#3C9A6E")
+_PROTO_COLOR = {
+    "fcc": "#A7C4DE",
+    "hcp": "#E3B89A",
+    "col": "#A3CDB0",
+    "rnd": "#5C5C5C",
+}
+_PROTO_LABEL = {"fcc": "FCC", "hcp": "HCP", "col": "COL", "rnd": "RND"}
+_PROTO_ORDER = ("fcc", "hcp", "col", "rnd")
+# Diagonal of the 1.29 m kept cube. The bin edges are 0.1 m, the rate-map bin.
+_IFD_BINS = np.linspace(0.0, 2.3, 24)
+
+
+def _plane_label(kappa, tau):
+    if kappa is None:
+        return "true plane"
+    kappa_s = r"$10^{6}$" if float(kappa) >= 1e5 else f"{float(kappa):g}"
+    return rf"κ_sens = {kappa_s}, τ = {int(tau)}"
+
+
+def _condition_scores(runs, seeds, kappa, tau):
+    found = []
+    for seed in seeds:
+        run = _run(runs, seed, kappa, tau)
+        if run is None:
+            continue
+        scores = run.get("scores")
+        if scores is not None:
+            found.append(scores)
+    return found
+
+
+def _mean_mra_curves(score_list):
+    """One mean MRA per score dict, and the rate-map bin count.
+
+    A prototype is one dict, so its curve is the mean across cells. A network
+    condition is one dict per seed. The band is the range of those means.
+    A band across cells would be far too tight, because the cells share one sheet.
+    """
+    means = []
+    bins = None
+    for scores in score_list:
+        mra = mra_curve(scores)
+        if mra is None:
+            continue
+        with np.errstate(invalid="ignore"):
+            means.append(np.nanmean(mra, axis=0))
+        bins = int(scores["bins"])
+    if not means or bins is None:
+        return None
+    width = min(len(m) for m in means)
+    return np.vstack([m[:width] for m in means]), bins
+
+
+def _join(score_list, take):
+    """Stack one stored vector from each score dict."""
+    parts = [p for p in (take(s) for s in score_list) if len(p)]
+    return np.concatenate(parts) if parts else np.empty(0)
+
+
+def _step_hist(ax, values, edges, **kwargs):
+    values = np.asarray(values, dtype=float).ravel()
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return
+    ax.hist(values, bins=edges, density=True, histtype="step", **kwargs)
+
+
+def plot_mra_curves(runs, plane_runs, seeds, proto_scores, env_size):
+    """Mean MRA against distance. One solid line per plane condition. """
+    fig, ax = plt.subplots(figsize=(6.6, 4.0))
+    ax.axhline(0.0, color="0.75", lw=1.0, zorder=1)
+    for kind in _PROTO_ORDER:
+        proto = proto_scores.get(kind) if proto_scores else None
+        if proto is None:
+            continue
+        pooled = _mean_mra_curves([proto])
+        if pooled is None:
+            continue
+        curves, bins = pooled
+        ax.plot(
+            mra_radii_m(curves.shape[1], bins, env_size), curves[0],
+            color=_PROTO_COLOR[kind], lw=1.3, ls="--" if kind != "rnd" else ":",
+            zorder=2, label=_PROTO_LABEL[kind],
+        )
+    for i, (kappa, tau) in enumerate(plane_runs):
+        pooled = _mean_mra_curves(_condition_scores(runs, seeds, kappa, tau))
+        if pooled is None:
+            continue
+        stacked, bins = pooled
+        with np.errstate(invalid="ignore"):
+            mid = np.nanmean(stacked, axis=0)
+            lo = np.nanmin(stacked, axis=0)
+            hi = np.nanmax(stacked, axis=0)
+        x = mra_radii_m(len(mid), bins, env_size)
+        color = _CONDITION_COLOR[i % len(_CONDITION_COLOR)]
+        if stacked.shape[0] > 1:
+            ax.fill_between(x, lo, hi, color=color, alpha=0.18, lw=0, zorder=2)
+        ax.plot(x, mid, color=color, lw=2.0, zorder=3, label=_plane_label(kappa, tau))
+    ax.set_xlabel("distance (m)")
+    ax.set_ylabel("MRA")
+    ax.set_xlim(left=0.0)
+    ax.grid(True, color="0.92", lw=0.6)
+    ax.set_axisbelow(True)
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+# First two distances of a 0.71 m hexagonal lattice. 1.23 m is √3 × 0.71.
+_IFD_GUIDES = (0.71, 1.23)
+
+
+def _lattice_reference(proto_scores):
+    """The lattice drawn behind each distance panel. FCC when it was scored."""
+    for kind in ("fcc", "hcp", "col"):
+        proto = proto_scores.get(kind)
+        if proto is not None:
+            return kind, proto
+    return None
+
+
+def plot_ifd_histograms(runs, plane_runs, seeds, proto_scores, env_size):
+    """All-pairs inter-field distances, one panel per plane condition..
+    Every curve uses the same bins on [0, 2.3] m and is normalised on its own.
+    """
+    panels = list(plane_runs)
+    n = len(panels)
+    ncols = 2 if n > 2 else max(n, 1)
+    nrows = int(np.ceil(n / ncols)) if n else 1
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(3.5 * ncols, 2.8 * nrows),
+        sharex=True, sharey=True, squeeze=False,
+    )
+    proto_scores = proto_scores or {}
+    lattice = _lattice_reference(proto_scores)
+    rnd = proto_scores.get("rnd")
+    flat = axes.ravel()
+    for i, (kappa, tau) in enumerate(panels):
+        ax = flat[i]
+        for guide in _IFD_GUIDES:
+            ax.axvline(guide, color="0.45", lw=0.8, zorder=1)
+        if rnd is not None:
+            _step_hist(
+                ax, normalized_to_metres(pooled_ifd(rnd), env_size), _IFD_BINS,
+                color="0.55", lw=1.2, zorder=2,
+            )
+        if lattice is not None:
+            kind, proto = lattice
+            _step_hist(
+                ax, normalized_to_metres(pooled_ifd(proto), env_size), _IFD_BINS,
+                color=_PROTO_COLOR[kind], lw=1.3, linestyle="--", zorder=2,
+            )
+        distances = _join(_condition_scores(runs, seeds, kappa, tau), pooled_ifd)
+        _step_hist(
+            ax, normalized_to_metres(distances, env_size), _IFD_BINS,
+            color=_CONDITION_COLOR[i % len(_CONDITION_COLOR)], lw=1.8, zorder=3,
+        )
+        ax.set_title(_plane_label(kappa, tau), fontsize=10)
+        ax.set_xlim(0.0, 2.3)
+        ax.grid(True, axis="y", color="0.92", lw=0.6)
+        ax.set_axisbelow(True)
+        if i % ncols == 0:
+            ax.set_ylabel("density")
+        if i >= n - ncols:
+            ax.set_xlabel("inter-field distance (m)")
+    for ax in flat[n:]:
+        ax.set_visible(False)
+    if n:
+        top = flat[0].get_ylim()[1]
+        for ax in flat[:n]:
+            for guide in _IFD_GUIDES:
+                ax.text(
+                    guide, top, f"{guide:.2f}", ha="center", va="top",
+                    fontsize=7, color="0.4",
+                )
+    def _legend_handles():
+        handles = []
+        if rnd is not None:
+            handles.append(Line2D([0], [0], color="0.55", lw=1.2, label="RND"))
+        if lattice is not None:
+            kind, _proto = lattice
+            handles.append(Line2D(
+                [0], [0], color=_PROTO_COLOR[kind], lw=1.3, ls="--",
+                label=_PROTO_LABEL[kind],
+            ))
+        return handles
+
+    if _legend_handles():
+        for ax in flat[:n]:
+            ax.legend(handles=_legend_handles(), frameon=False, fontsize=7, loc="upper right")
+    fig.tight_layout()
+    return fig
+
+
+def _ecdf(values):
+    values = np.asarray(values, dtype=float).ravel()
+    values = np.sort(values[np.isfinite(values)])
+    if values.size == 0:
+        return None
+    return values, np.arange(1, values.size + 1) / values.size
+
+
+def plot_cv_distributions(runs, plane_runs, seeds, proto_scores):
+    """Cumulative distribution of the 3 nearest neighbour spacing CV"""
+    fig, ax = plt.subplots(figsize=(6.6, 4.0))
+    rnd = np.empty(0)
+    if proto_scores and proto_scores.get("rnd") is not None:
+        rnd = pooled_ifd_cv(proto_scores["rnd"])
+    curve = _ecdf(rnd)
+    if curve is not None:
+        ax.step(
+            curve[0], curve[1], where="post", color=_PROTO_COLOR["rnd"],
+            lw=1.6, linestyle=":", label="RND", zorder=2,
+        )
+    for i, (kappa, tau) in enumerate(plane_runs):
+        curve = _ecdf(_join(_condition_scores(runs, seeds, kappa, tau), pooled_ifd_cv))
+        if curve is None:
+            continue
+        ax.step(
+            curve[0], curve[1], where="post",
+            color=_CONDITION_COLOR[i % len(_CONDITION_COLOR)], lw=2.0,
+            label=_plane_label(kappa, tau), zorder=3,
+        )
+    ax.set_xlabel("local spacing CV")
+    ax.set_ylabel("cumulative fraction")
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(True, axis="y", color="0.92", lw=0.6)
+    ax.set_axisbelow(True)
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
     return fig
 
