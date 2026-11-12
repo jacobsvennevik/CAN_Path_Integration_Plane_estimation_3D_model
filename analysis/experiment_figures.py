@@ -595,6 +595,13 @@ def _join(score_list, take):
     return np.concatenate(parts) if parts else np.empty(0)
 
 
+def _matched_rnd(proto_scores):
+    """The density-matched random scores stored by the notebook, if that cell ran."""
+    if not proto_scores:
+        return None
+    return proto_scores.get("rnd_matched")
+
+
 def _step_hist(ax, values, edges, **kwargs):
     values = np.asarray(values, dtype=float).ravel()
     values = values[np.isfinite(values)]
@@ -608,7 +615,8 @@ def plot_mra_curves(runs, plane_runs, seeds, proto_scores, env_size):
     fig, ax = plt.subplots(figsize=(6.6, 4.0))
     ax.axhline(0.0, color="0.75", lw=1.0, zorder=1)
     for kind in _PROTO_ORDER:
-        proto = proto_scores.get(kind) if proto_scores else None
+        key = "rnd_matched" if kind == "rnd" else kind
+        proto = proto_scores.get(key) if proto_scores else None
         if proto is None:
             continue
         pooled = _mean_mra_curves([proto])
@@ -671,7 +679,7 @@ def plot_ifd_histograms(runs, plane_runs, seeds, proto_scores, env_size):
     )
     proto_scores = proto_scores or {}
     lattice = _lattice_reference(proto_scores)
-    rnd = proto_scores.get("rnd")
+    rnd = _matched_rnd(proto_scores)
     flat = axes.ravel()
     for i, (kappa, tau) in enumerate(panels):
         ax = flat[i]
@@ -741,9 +749,8 @@ def _ecdf(values):
 def plot_cv_distributions(runs, plane_runs, seeds, proto_scores):
     """Cumulative distribution of the 3 nearest neighbour spacing CV"""
     fig, ax = plt.subplots(figsize=(6.6, 4.0))
-    rnd = np.empty(0)
-    if proto_scores and proto_scores.get("rnd") is not None:
-        rnd = pooled_ifd_cv(proto_scores["rnd"])
+    rnd_scores = _matched_rnd(proto_scores)
+    rnd = pooled_ifd_cv(rnd_scores) if rnd_scores is not None else np.empty(0)
     curve = _ecdf(rnd)
     if curve is not None:
         ax.step(

@@ -5,6 +5,26 @@ from scipy.spatial.transform import Rotation
 from config import world_to_flat_bins
 
 
+def _random_volume(env_size, field_sd):
+    """Box in which random centres are placed, including the 4-width margin."""
+    half = float(env_size) / 2.0
+    margin = 4.0 * float(field_sd)
+    return (2.0 * (half + margin)) ** 3
+
+
+def random_centre_count(spacing, env_size, field_sd):
+    """How many centres the random branch plants at this spacing."""
+    return int(round(np.sqrt(2.0) / float(spacing) ** 3 * _random_volume(env_size, field_sd)))
+
+
+def random_centre_spacing(n_fields, env_size, field_sd):
+    """Spacing that plants about n_fields uniform centres."""
+    n_fields = float(n_fields)
+    if n_fields < 1.0:
+        raise ValueError("n_fields must be at least 1")
+    return (np.sqrt(2.0) * _random_volume(env_size, field_sd) / n_fields) ** (1.0 / 3.0)
+
+
 def reference_activity(kind, n_cells, world_pos, spacing, field_sd, env_size, seed=0):
     """Genrates protopyes of lattices in the 3D box"""
     rng = np.random.default_rng(seed)
@@ -29,7 +49,7 @@ def reference_activity(kind, n_cells, world_pos, spacing, field_sd, env_size, se
         #Every branch generates a tree (field centres) and query points (positions on the walk)
         
         if kind == "rnd":   #randomly distributed cells in the box
-            n = int(round(np.sqrt(2) / S ** 3 * (2 * (half + margin)) ** 3))
+            n = random_centre_count(S, env_size, field_sd)
             #random cells in three, whole trajectory in q
             tree, q = cKDTree(rng.uniform(-half - margin, half + margin, (n, 3))), world_pos #
         elif kind == "col":     # striped cell firing, columns
