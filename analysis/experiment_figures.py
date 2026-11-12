@@ -6,6 +6,10 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import FixedFormatter, FixedLocator, LogLocator, NullLocator
 from matplotlib.transforms import blended_transform_factory
 
+from . import gongyu_scoring as gy
+from .gridness2d import percentile_cells
+from .rate_maps import SMOOTH_SIGMA, _rate_map_from_accumulator, _spatial_info
+
 
 # Lines through the κ_sens × τ grid. A third line appears when some τ
 # other than 1 was run at more than one κ_sens.
@@ -147,16 +151,6 @@ def _unwrapped_total(run):
     return float(run["result"].unwrapped_error_rad)
 
 
-def _one_grid_spacing_rad(runs):
-    """Radians in one grid spacing."""
-    for run in runs.values():
-        params = getattr(run.get("result"), "params", None) or {}
-        lam = (params.get("network") or {}).get("lambda_net")
-        if lam is not None:
-            return float(lam)
-    return None
-
-
 def _rad_ylim(values):
     """Log limits that include every positive value, and the 4.4 rad wrap ceiling."""
     vals = np.asarray(values, dtype=float)
@@ -259,13 +253,13 @@ def _plot_two_slices(runs, plane_runs, seeds, rows, show_rms, guides=None):
     return fig
 
 
-def plot_final_error(runs, plane_runs, seeds):
+def plot_final_error(runs, plane_runs, seeds, half_spacing):
     """Wrapped final error and unwrapped total, in radians, for the two slices."""
     series = (
         (_wrapped_final, "wrapped final error\n(rad)"),
         (_unwrapped_total, "unwrapped total\n(rad)"),
     )
-    spacing = _one_grid_spacing_rad(runs)
+    half_grid = float(half_spacing)
     rows = []
     guides = []
     for value_of, ylabel in series:
@@ -273,13 +267,9 @@ def plot_final_error(runs, plane_runs, seeds):
             _values(runs, seeds, kappa, tau, value_of)
             for kappa, tau in [(None, None), *_unique_conditions(plane_runs)]
         ]
-        vals = np.concatenate(collected)
-        guide = None
-        if value_of is _unwrapped_total and spacing is not None:
-            vals = np.append(vals, spacing)
-            guide = (spacing, "1 grid spacing")
+        vals = np.concatenate([*collected, [half_grid]])
         rows.append((value_of, ylabel, None, None, _rad_ylim(vals)))
-        guides.append(guide)
+        guides.append((half_grid, "½ bump spacing"))
     return _plot_two_slices(runs, plane_runs, seeds, rows, show_rms=True, guides=guides)
 
 
@@ -498,5 +488,45 @@ def plot_scores_vs_plane_error(score_df, plane_runs, metrics, xmax=None):
         loc="center" if n < len(flat) else "best",
     )
     fig.tight_layout()
+    return fig
+
+
+# (label, azimuth, altitude) in gy.oblique_slice's convention. Vertical slices have z pointing up.
+_SLICES = (
+    ("horizontal (x–y)", 0.0, 0.0),
+    ("vertical (y–z)", 0.0, np.pi / 2),
+    ("vertical (x–z)", np.pi / 2, np.pi / 2),
+)
+
+
+def percentile_slices(sums, counts, title, active_mask=None, percentiles=(10, 50, 90),
+                      vmax=3.0, sigma=SMOOTH_SIGMA):
+    """Scored cells at spatial-information percentiles, one column per cell, one row per slice."""
+    scored_idx = np.where(active_mask)[0] if active_mask is not None else np.arange(sums.shape[-1])
+    f = _rate_map_from_accumulator(sums[..., scored_idx], counts, sigma=sigma)
+    p = counts / (counts.sum() + 1e-30)
+    si = _spatial_info(p, f)
+    idx = percentile_cells(si, percentiles)
+    visited = counts > 0
+    scale = dict(vmin=0, vmax=vmax) if vmax is not None else {}
+    fig, axes = plt.subplots(
+        len(_SLICES), len(idx), figsize=(3.2 * len(idx), 3.0 * len(_SLICES)), squeeze=False,
+    )
+    for col, k in enumerate(idx):
+        g = f[..., k] / f[..., k][visited].mean()
+        cv = f[..., k][visited].std() / f[..., k][visited].mean()
+        for row, (name, az, al) in enumerate(_SLICES):
+            sl = gy.oblique_slice(g, az, al, bins=g.shape[0])[..., 0]
+            ax = axes[row, col]
+            im = ax.imshow(sl, origin="lower", cmap="viridis", **scale)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if row == 0:
+                ax.set_title(f"rate  p{percentiles[col]}\nSI {si[k]:.2f}  CV {cv:.2f}", fontsize=10)
+            if col == 0:
+                ax.set_ylabel(name)
+    fig.suptitle(title)
+    if vmax is not None:
+        fig.colorbar(im, ax=axes, shrink=0.6, label="rate / map mean")
     return fig
 
