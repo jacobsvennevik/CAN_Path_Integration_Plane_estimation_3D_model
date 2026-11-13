@@ -16,6 +16,11 @@ def _median(values):
     return float(np.median(a)) if a.size else float("nan")
 
 
+def _maximum(values):
+    a = _finite(values)
+    return float(np.max(a)) if a.size else float("nan")
+
+
 def _fraction(values, keep):
     a = _finite(values)
     return float(np.mean(keep(a))) if a.size else float("nan")
@@ -148,6 +153,7 @@ def summarize_3d(scores, grid_spacing=None, env_size=None):
         **selectivity_row(scores),
         median_chi_fcc=_median(chi[0]) if chi.shape[0] else float("nan"),
         median_chi_hcp=_median(chi[1]) if chi.shape[0] > 1 else float("nan"),
+        best_chi_hcp=_maximum(chi[1]) if chi.shape[0] > 1 else float("nan"),
         median_chi_col=_median(chi[2]) if chi.shape[0] > 2 else float("nan"),
         median_ifd=_median(pooled_ifd(scores)),
         median_ifd_cv=_median(pooled_ifd_cv(scores)),
