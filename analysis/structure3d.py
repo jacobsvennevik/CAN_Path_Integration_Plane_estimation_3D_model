@@ -97,48 +97,78 @@ def _best_hex_azimuths(hgs_at_pitch: np.ndarray):
 
 
 def grieves_chi_1cell(ac_cell: np.ndarray) -> np.ndarray:
-    """(3,) structure scores (fcc, hcp, col) for one 3-D autocorrelogram.
+    """(3,) structure scores (fcc, hcp, col) for one cells 3-D autocorrelogram.
     """
+    #convert to 3D array, and build dirrections we will slice along 
     ac = np.asarray(ac_cell, dtype=float)
     if ac.ndim == 4:
         ac = ac[..., 0]
-    az_deg, pitch_deg = _orientation_grid_deg()
-    az = np.deg2rad(az_deg)
+    az, pitch_deg = _orientation_grid_deg()
+    az = np.deg2rad(az)
     pitch = np.deg2rad(pitch_deg)
 
+    #Score each of the slice direcetions for a hexagonal pattern
     hgs_lab, _, _, _ = _score_planes(ac, az, pitch, hex_only=True)
     if not np.isfinite(hgs_lab).any():
         return np.full(3, np.nan)
-    i_az, i_pitch = np.unravel_index(int(np.nanargmax(hgs_lab)), hgs_lab.shape)
-    aligned = _rotate_cube_to_horizontal(ac[..., None], az[i_az], pitch[i_pitch])[..., 0]
 
-    hgs, _, interp, template = _score_planes(aligned, az, pitch, hex_only=True)
+    # create a canidate list of planes to score, at most 8, and at least 20 degrees apart.
+    hmax = np.nanmax(hgs_lab)
+    cands, normals = [], []
+    #sort the planes, NaN last (-infinite)
+    order = np.argsort(np.where(np.isfinite(hgs_lab), hgs_lab, -np.inf).ravel())[::-1]
+    #loop through the sorted planes, 
+    for k, flat in enumerate(order):
+        #i is the azimuth, j is the pitch.
+        i, j = np.unravel_index(int(flat), hgs_lab.shape)
+        #if we have 8 candidates, or the current plane is not at least 80% of the best plane, break
+        if len(cands) == 8 or (k > 0 and not hgs_lab[i, j] >= 0.8 * hmax):
+            break
+        #n leaves as its normal vecotor
+        n = np.array([-np.cos(az[i]) * np.sin(pitch[j]),
+                      np.sin(az[i]) * np.sin(pitch[j]),
+                      np.cos(pitch[j])])
+        if all(abs(n @ m) <= np.cos(np.deg2rad(20.0)) for m in normals):
+            cands.append((i, j))
+            normals.append(n)
+
+    # Now tests each candiate plane as the referece plane keeping the best one
+    az_fine = np.deg2rad(np.arange(0.0, 360.0, GRIEVES_HEX_AZ_STEP))
+    best = None
+    #loop through the candidates
+    for i_az, i_pitch in cands:
+        #rotate the cube to the candidate plane
+        aligned = _rotate_cube_to_horizontal(ac[..., None], az[i_az], pitch[i_pitch])[..., 0]
+        #score the candidate plane for a hexagonal pattern
+        hgs_hex, sgs_hex, interp, template = _score_planes(
+            aligned, az_fine, [np.deg2rad(GRIEVES_PITCH_HEX)])
+        #find the best azimuth for a hexagonal pattern
+        hex_idx = _best_hex_azimuths(hgs_hex[:, 0])
+        #if no hexagonal pattern, continue
+        if hex_idx is None:
+            continue
+        #find the best azimuth for a square pattern
+        off_idx = (hex_idx + len(az_fine) // 6) % len(az_fine)
+        _, sgs_sq, _, _ = _score_planes(
+            aligned, az_fine[np.concatenate([hex_idx, off_idx])],
+            [np.deg2rad(GRIEVES_PITCH_SQUARE)], interp=interp, template=template)
+        #calculate the square pattern scores
+        sq_hex, sq_off = _nanmedian(sgs_sq[:3, 0]), _nanmedian(sgs_sq[3:, 0])
+        #calculate the evidence for the candidate plane
+        evidence = _nanmedian(hgs_hex[hex_idx, 0]) + np.nanmax([sq_hex, sq_off])
+        #Update if it is better 
+        if np.isfinite(evidence) and (best is None or evidence > best[0]):
+            best = (evidence, aligned, sq_off - sq_hex, sq_hex - _nanmedian(sgs_hex[hex_idx, 0]))
+
     out = np.full(3, np.nan)
-
+    if best is None:   # no triplet in any candidate: highest-HGS frame, chi_COL only (as before)
+        aligned = _rotate_cube_to_horizontal(
+            ac[..., None], az[cands[0][0]], pitch[cands[0][1]])[..., 0]
+    else:
+        _, aligned, out[0], out[1] = best
+    hgs, _, _, _ = _score_planes(aligned, az, pitch, hex_only=True)
     near = pitch_deg <= GRIEVES_PITCH_COLUMN
     out[2] = _nanmedian(hgs[:, near]) - _nanmedian(hgs[:, ~near])
-
-    az_fine_deg = np.arange(0.0, 360.0, GRIEVES_HEX_AZ_STEP)
-    az_fine = np.deg2rad(az_fine_deg)
-    hgs_hex, sgs_hex, _, _ = _score_planes(
-        aligned, az_fine, [np.deg2rad(GRIEVES_PITCH_HEX)],
-        interp=interp, template=template,
-    )
-    hex_idx = _best_hex_azimuths(hgs_hex[:, 0])
-    if hex_idx is None:
-        return out
-
-    off_idx = (hex_idx + (len(az_fine_deg) // 6)) % len(az_fine_deg)
-    headings = az_fine[np.concatenate([hex_idx, off_idx])]
-    _, sgs_sq, _, _ = _score_planes(
-        aligned, headings, [np.deg2rad(GRIEVES_PITCH_SQUARE)],
-        interp=interp, template=template,
-    )
-    sgs_at_square_hex = sgs_sq[:3, 0]
-    sgs_at_square_off = sgs_sq[3:, 0]
-    sgs_at_hex_pitch = sgs_hex[hex_idx, 0]
-    out[0] = _nanmedian(sgs_at_square_off) - _nanmedian(sgs_at_square_hex)
-    out[1] = _nanmedian(sgs_at_square_hex) - _nanmedian(sgs_at_hex_pitch)
     return out
 
 

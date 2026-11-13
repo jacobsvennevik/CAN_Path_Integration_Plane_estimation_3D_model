@@ -491,6 +491,8 @@ def plot_scores_vs_plane_error(score_df, plane_runs, metrics, xmax=None):
         loc="center" if n < len(flat) else "best",
     )
     fig.tight_layout()
+    # "median lattice fit" is wider than the margin tight_layout leaves.
+    fig.subplots_adjust(left=max(fig.subplotpars.left, 0.16))
     return fig
 
 
@@ -652,88 +654,126 @@ def plot_mra_curves(runs, plane_runs, seeds, proto_scores, env_size):
     return fig
 
 
-# First two distances of a 0.71 m hexagonal lattice. 1.23 m is √3 × 0.71.
+# First two distances of a 0.71 m hexagonal lattice
 _IFD_GUIDES = (0.71, 1.23)
+_RND_COLOR = "#1F1F1F"
 
 
-def _lattice_reference(proto_scores):
-    """The lattice drawn behind each distance panel. FCC when it was scored."""
-    for kind in ("fcc", "hcp", "col"):
-        proto = proto_scores.get(kind)
+def _reference_entries(proto_scores):
+    """FCC, HCP, COL, then the density-matched random cloud."""
+    proto_scores = proto_scores or {}
+    found = []
+    for kind in _PROTO_ORDER:
+        if kind == "rnd":
+            proto = _matched_rnd(proto_scores)
+            if proto is None:
+                proto = proto_scores.get("rnd")
+        else:
+            proto = proto_scores.get(kind)
         if proto is not None:
-            return kind, proto
-    return None
+            found.append((kind, proto))
+    return found
+
+
+def _reference_color(kind):
+    if kind == "rnd":
+        return _RND_COLOR
+    return _PROTO_COLOR[kind]
+
+
+def _random_cloud_label(proto):
+    """Name the cloud by how many fields were actually detected."""
+    n = np.asarray((proto or {}).get("n_fields"), dtype=float).ravel()
+    n = n[np.isfinite(n)]
+    if n.size == 0:
+        return "random cloud"
+    med = float(np.median(n))
+    count = f"{med:.0f}" if abs(med - round(med)) < 1e-6 else f"{med:.1f}"
+    return f"random cloud ({count} fields)"
+
+
+def _style_distance_ax(ax, title, ylabel, xlabel):
+    for guide in _IFD_GUIDES:
+        ax.axvline(guide, color="0.45", lw=0.8, zorder=1)
+    ax.set_title(title, fontsize=10)
+    ax.set_xlim(0.0, 2.3)
+    ax.grid(True, axis="y", color="0.92", lw=0.6)
+    ax.set_axisbelow(True)
+    if ylabel:
+        ax.set_ylabel(ylabel)
+    if xlabel:
+        ax.set_xlabel(xlabel)
+
+
+def _label_ifd_guides(axes):
+    if not len(axes):
+        return
+    top = axes[0].get_ylim()[1]
+    for ax in axes:
+        for guide in _IFD_GUIDES:
+            ax.text(
+                guide, top, f"{guide:.2f}", ha="center", va="top",
+                fontsize=7, color="0.4",
+            )
 
 
 def plot_ifd_histograms(runs, plane_runs, seeds, proto_scores, env_size):
     """All-pairs inter-field distances, one panel per plane condition..
-    Every curve uses the same bins on [0, 2.3] m and is normalised on its own.
     """
+    refs = _reference_entries(proto_scores)
+    rnd = next((proto for kind, proto in refs if kind == "rnd"), None)
+    rnd_label = _random_cloud_label(rnd) if rnd is not None else "random cloud"
     panels = list(plane_runs)
-    n = len(panels)
-    ncols = 2 if n > 2 else max(n, 1)
-    nrows = int(np.ceil(n / ncols)) if n else 1
+    ncols = max(len(refs), len(panels), 1)
+    nrows = (1 if refs else 0) + (1 if panels else 0)
+    if nrows == 0:
+        return plt.subplots(figsize=(3.5, 2.8))[0]
     fig, axes = plt.subplots(
-        nrows, ncols, figsize=(3.5 * ncols, 2.8 * nrows),
+        nrows, ncols, figsize=(3.4 * ncols, 2.7 * nrows),
         sharex=True, sharey=True, squeeze=False,
     )
-    proto_scores = proto_scores or {}
-    lattice = _lattice_reference(proto_scores)
-    rnd = _matched_rnd(proto_scores)
-    flat = axes.ravel()
-    for i, (kappa, tau) in enumerate(panels):
-        ax = flat[i]
-        for guide in _IFD_GUIDES:
-            ax.axvline(guide, color="0.45", lw=0.8, zorder=1)
-        if rnd is not None:
-            _step_hist(
-                ax, normalized_to_metres(pooled_ifd(rnd), env_size), _IFD_BINS,
-                color="0.55", lw=1.2, zorder=2,
-            )
-        if lattice is not None:
-            kind, proto = lattice
+    row = 0
+    if refs:
+        for col, (kind, proto) in enumerate(refs):
+            ax = axes[row, col]
             _step_hist(
                 ax, normalized_to_metres(pooled_ifd(proto), env_size), _IFD_BINS,
-                color=_PROTO_COLOR[kind], lw=1.3, linestyle="--", zorder=2,
+                color=_reference_color(kind), lw=1.6, zorder=2,
             )
-        distances = _join(_condition_scores(runs, seeds, kappa, tau), pooled_ifd)
-        _step_hist(
-            ax, normalized_to_metres(distances, env_size), _IFD_BINS,
-            color=_CONDITION_COLOR[i % len(_CONDITION_COLOR)], lw=1.8, zorder=3,
+            _style_distance_ax(
+                ax, rnd_label if kind == "rnd" else _PROTO_LABEL[kind],
+                "density" if col == 0 else "",
+                "inter-field distance (m)" if not panels else "",
+            )
+        for col in range(len(refs), ncols):
+            axes[row, col].set_visible(False)
+        row += 1
+    if panels:
+        rnd_metres = (
+            normalized_to_metres(pooled_ifd(rnd), env_size) if rnd is not None else None
         )
-        ax.set_title(_plane_label(kappa, tau), fontsize=10)
-        ax.set_xlim(0.0, 2.3)
-        ax.grid(True, axis="y", color="0.92", lw=0.6)
-        ax.set_axisbelow(True)
-        if i % ncols == 0:
-            ax.set_ylabel("density")
-        if i >= n - ncols:
-            ax.set_xlabel("inter-field distance (m)")
-    for ax in flat[n:]:
-        ax.set_visible(False)
-    if n:
-        top = flat[0].get_ylim()[1]
-        for ax in flat[:n]:
-            for guide in _IFD_GUIDES:
-                ax.text(
-                    guide, top, f"{guide:.2f}", ha="center", va="top",
-                    fontsize=7, color="0.4",
+        for col, (kappa, tau) in enumerate(panels):
+            ax = axes[row, col]
+            if rnd_metres is not None:
+                _step_hist(ax, rnd_metres, _IFD_BINS, color=_RND_COLOR, lw=0.9, zorder=2)
+            distances = _join(_condition_scores(runs, seeds, kappa, tau), pooled_ifd)
+            _step_hist(
+                ax, normalized_to_metres(distances, env_size), _IFD_BINS,
+                color=_CONDITION_COLOR[col % len(_CONDITION_COLOR)], lw=1.8, zorder=3,
+            )
+            _style_distance_ax(
+                ax, _plane_label(kappa, tau),
+                "density" if col == 0 else "",
+                "inter-field distance (m)",
+            )
+            if col == 0 and rnd is not None:
+                ax.legend(
+                    handles=[Line2D([0], [0], color=_RND_COLOR, lw=0.9, label=rnd_label)],
+                    frameon=False, fontsize=7, loc="upper right",
                 )
-    def _legend_handles():
-        handles = []
-        if rnd is not None:
-            handles.append(Line2D([0], [0], color="0.55", lw=1.2, label="RND"))
-        if lattice is not None:
-            kind, _proto = lattice
-            handles.append(Line2D(
-                [0], [0], color=_PROTO_COLOR[kind], lw=1.3, ls="--",
-                label=_PROTO_LABEL[kind],
-            ))
-        return handles
-
-    if _legend_handles():
-        for ax in flat[:n]:
-            ax.legend(handles=_legend_handles(), frameon=False, fontsize=7, loc="upper right")
+        for col in range(len(panels), ncols):
+            axes[row, col].set_visible(False)
+    _label_ifd_guides([ax for ax in axes.ravel() if ax.get_visible()])
     fig.tight_layout()
     return fig
 
@@ -746,32 +786,49 @@ def _ecdf(values):
     return values, np.arange(1, values.size + 1) / values.size
 
 
-def plot_cv_distributions(runs, plane_runs, seeds, proto_scores):
-    """Cumulative distribution of the 3 nearest neighbour spacing CV"""
-    fig, ax = plt.subplots(figsize=(6.6, 4.0))
-    rnd_scores = _matched_rnd(proto_scores)
-    rnd = pooled_ifd_cv(rnd_scores) if rnd_scores is not None else np.empty(0)
-    curve = _ecdf(rnd)
-    if curve is not None:
-        ax.step(
-            curve[0], curve[1], where="post", color=_PROTO_COLOR["rnd"],
-            lw=1.6, linestyle=":", label="RND", zorder=2,
-        )
-    for i, (kappa, tau) in enumerate(plane_runs):
-        curve = _ecdf(_join(_condition_scores(runs, seeds, kappa, tau), pooled_ifd_cv))
-        if curve is None:
-            continue
-        ax.step(
-            curve[0], curve[1], where="post",
-            color=_CONDITION_COLOR[i % len(_CONDITION_COLOR)], lw=2.0,
-            label=_plane_label(kappa, tau), zorder=3,
-        )
+def _style_cv_ax(ax, title):
+    ax.set_title(title, fontsize=10)
     ax.set_xlabel("local spacing CV")
-    ax.set_ylabel("cumulative fraction")
     ax.set_ylim(0.0, 1.0)
     ax.grid(True, axis="y", color="0.92", lw=0.6)
     ax.set_axisbelow(True)
     ax.legend(frameon=False, fontsize=8)
+
+
+def plot_cv_distributions(runs, plane_runs, seeds, proto_scores):
+    """Cumulative distribution of the 3 nearest neighbour spacing CV"""
+    refs = _reference_entries(proto_scores)
+    rnd = next((proto for kind, proto in refs if kind == "rnd"), None)
+    rnd_label = _random_cloud_label(rnd) if rnd is not None else "random cloud"
+    fig, axes = plt.subplots(1, 2, figsize=(10.4, 4.0), sharex=True, sharey=True)
+    for kind, proto in refs:
+        curve = _ecdf(pooled_ifd_cv(proto))
+        if curve is None:
+            continue
+        axes[0].step(
+            curve[0], curve[1], where="post", color=_reference_color(kind),
+            lw=2.0 if kind == "rnd" else 1.6,
+            label=rnd_label if kind == "rnd" else _PROTO_LABEL[kind], zorder=3,
+        )
+    if rnd is not None:
+        curve = _ecdf(pooled_ifd_cv(rnd))
+        if curve is not None:
+            axes[1].step(
+                curve[0], curve[1], where="post", color=_RND_COLOR,
+                lw=1.2, label=rnd_label, zorder=2,
+            )
+    for i, (kappa, tau) in enumerate(plane_runs):
+        curve = _ecdf(_join(_condition_scores(runs, seeds, kappa, tau), pooled_ifd_cv))
+        if curve is None:
+            continue
+        axes[1].step(
+            curve[0], curve[1], where="post",
+            color=_CONDITION_COLOR[i % len(_CONDITION_COLOR)], lw=2.0,
+            label=_plane_label(kappa, tau), zorder=3,
+        )
+    _style_cv_ax(axes[0], "prototypes")
+    _style_cv_ax(axes[1], "network")
+    axes[0].set_ylabel("cumulative fraction")
     fig.tight_layout()
     return fig
 
